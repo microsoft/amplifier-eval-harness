@@ -53,3 +53,9 @@ config:
         enable_long_context: 'false'
         priority: 13
         reasoning_effort: high
+
+# Routing matrix — matches the harness owner's host configuration so model_role
+# selections (general / fast / coding / reasoning / etc.) resolve consistently
+# inside DTUs to the same models the user runs locally.
+routing:
+  matrix: balanced
