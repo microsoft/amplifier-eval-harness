@@ -6,29 +6,38 @@ Runs `bundles × scenarios × runs` matrices in isolated containers, captures pe
 
 ## Status
 
-**Pre-alpha.** v0 scaffolding. The smoke config runs end-to-end but has not been validated against real DTU launches yet.
+**Pre-alpha (v0.2).** Sequential and parallel execution paths in place. Smoke-tests have not yet been run against a live DTU.
 
 ## Quick start
 
 ```bash
 # Prerequisites:
-#   - amplifier CLI installed              (uv tool install git+https://github.com/microsoft/amplifier)
-#   - amplifier-bundle-gitea available     (provides amplifier-gitea CLI)
-#   - amplifier-bundle-digital-twin-universe available (provides amplifier-digital-twin CLI)
-#   - Docker running                       (for Gitea container)
-#   - Incus configured                     (for DTU containers)
-#   - ANTHROPIC_API_KEY set in the environment
+#   - amplifier CLI installed (uv tool install git+https://github.com/microsoft/amplifier)
+#   - amplifier-bundle-gitea (provides amplifier-gitea CLI)
+#   - amplifier-bundle-digital-twin-universe (provides amplifier-digital-twin CLI)
+#   - Docker running (for Gitea container) + Incus (for DTU containers)
+#   - At least one provider env var set (ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, GITHUB_TOKEN…)
 
-# Install the harness
-uv tool install --from . eval-harness
+# Install
+uv tool install --from . amplifier-eval-harness
 
-# Run the smoke config (1 bundle × 1 scenario × 1 run)
-eval-harness run --config configs/smoke.yaml
+# Sanity check (no DTU launches)
+amplifier-eval-harness validate --config configs/smoke.yaml
 
-# Inspect results
-ls eval-results/<timestamp>/runs/*/
-cat eval-results/<timestamp>/summary.md
+# Smoke run (1 bundle × 1 scenario × 1 run, sequential)
+amplifier-eval-harness run --config configs/smoke.yaml
+
+# Baseline (foundation + amplifier-dev × 3 runs each, up to 2 in parallel)
+amplifier-eval-harness run --config configs/baseline.yaml
+
+# Override parallelism at the CLI without editing the config
+amplifier-eval-harness run --config configs/baseline.yaml --parallelism 4
+
+# Dry run (just expand and print the matrix)
+amplifier-eval-harness run --config configs/smoke.yaml --dry-run
 ```
+
+Output lands in `eval-results/<config-stem>-<timestamp>/`. Read `summary.md` first.
 
 ## Configs
 
@@ -36,10 +45,10 @@ Configs live in `configs/`. Add new ones with descriptive names; pick which to r
 
 | Config | Purpose |
 |---|---|
-| `smoke.yaml` | Inner-dev-loop. 1 bundle × 1 scenario × 1 run. |
-| `baseline.yaml` | Foundation + amplifier-dev × explain-repo × 3 runs. |
+| `smoke.yaml` | Inner-dev-loop. 1 bundle × 1 scenario × 1 run, sequential. |
+| `baseline.yaml` | foundation + amplifier-dev × explain-repo × 3 runs each, parallelism=2. |
 
-See [docs/designs/architecture.md](docs/designs/architecture.md) for the full schema.
+See [docs/designs/architecture.md](docs/designs/architecture.md) for the full schema and run flow.
 
 ## Scenarios
 
@@ -49,21 +58,36 @@ Scenarios live in `scenarios/<id>/`. Each scenario has a `prompt.md` and an opti
 |---|---|
 | `explain-repo` | File reading, code summarization. Stable across runs. |
 
+## Settings overlays
+
+Per-config provider/model selection happens via a YAML overlay deep-merged into the container's `~/.amplifier/settings.yaml` at provision time. The default overlay (`settings/default-providers.yaml`) is lifted from the harness owner's `~/.amplifier/settings.yaml` minus `provider-chat-completions` (which is local-only and not relevant inside DTUs).
+
+To use a different model mix, copy the overlay, edit, and point the config's `settings_overlay:` at the new file.
+
 ## Architecture in 60 seconds
 
-1. Read config → expand matrix into list of `RunSpec`
-2. Ensure Gitea instance, push all relevant repos into it (upstream mirror or local snapshot)
-3. For each `RunSpec`: render DTU profile → launch → exec `amplifier run --bundle X --output-format json-trace "..."` → capture stdout + exit + session files → destroy
-4. Write per-run artifacts and aggregate summary
+1. Read config → expand `bundles × scenarios × runs_per_combo` into a flat list of `RunSpec`.
+2. Ensure a Gitea instance, push every relevant repo into it (upstream mirror or local working-tree snapshot).
+3. For each `RunSpec` (sequential when `parallelism: 1`, ThreadPoolExecutor-bounded when `> 1`):
+   - Render a parameterized DTU profile.
+   - Launch DTU; wait for readiness; push scenario workspace fixture; deep-merge settings overlay.
+   - `exec amplifier run --bundle <name> --output-format json-trace "<prompt>"` and capture stdout, stderr, exit code.
+   - `file-pull` the session directory; destroy DTU (or keep on failure).
+4. Aggregate results into `manifest.json`, `summary.csv`, `summary.md`.
 
-The harness *always* routes through Gitea, even when no local overrides are configured. This keeps one code path; swapping in a local working tree is a one-line config flip.
+Always routes installs through Gitea — one code path, swapping in a local working tree is a per-repo flag rather than a runtime mode switch.
 
-## Limitations (v0)
+## Parallelism
 
-- **Sequential.** No parallel run pool yet.
-- **No token/cost capture.** amplifier CLI doesn't surface these. Wall clock, tool calls, exit code only.
-- **No quality scoring.** Raw artifacts only; bring your own judgment or LLM-as-judge later.
-- **Single provider per config.** Multi-provider runs require separate configs.
+`parallelism: N` in the config (or `--parallelism N` on the CLI) caps the number of concurrent DTUs. Each running DTU consumes ~1.5–2 GB of RAM and a CPU core during provisioning. Pick a value your machine can sustain.
+
+Gitea is shared but read-mostly during the run loop — repo population happens once, sequentially, before any DTU launches. Output from concurrent runs is interleaved on stderr; each line is prefixed with the run id for traceability.
+
+## Limitations (v0.2)
+
+- **No token / cost capture.** amplifier CLI doesn't surface these. Wall clock, tool call count, agent invocations, full transcript, and per-tool execution trace are captured.
+- **No quality scoring.** Raw artifacts only; LLM-as-judge / rubric scoring is a separate later layer that reads `runs/*/result.json`.
+- **Single provider mix per config.** Different model setups require different `settings_overlay:` files (and therefore different configs).
 
 ## Layout
 
@@ -73,6 +97,13 @@ The harness *always* routes through Gitea, even when no local overrides are conf
 ├── pyproject.toml
 ├── docs/designs/architecture.md       # source-of-truth design doc
 ├── eval_harness/                      # the CLI package
+│   ├── cli.py        # eval-harness CLI (run / validate / gitea-status)
+│   ├── config.py     # YAML schema + matrix expansion
+│   ├── gitea.py      # Gitea instance lifecycle + mirror/snapshot push
+│   ├── profile.py    # Parameterized profile rendering (url_rewrites dedup, settings overlay splice)
+│   ├── runner.py     # Per-run flow (launch / exec / file-pull / destroy)
+│   ├── results.py    # Per-run JSON, summary CSV/MD, manifest
+│   └── _log.py       # Thread-local log prefix for parallel runs
 ├── profiles/eval-base.yaml.tmpl       # parameterized DTU profile
 ├── configs/                           # ready-to-run named configs
 ├── scenarios/                         # prompt + workspace fixtures

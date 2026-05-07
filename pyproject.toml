@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "amplifier-eval-harness"
-version = "0.1.0"
+version = "0.2.0"
 description = "Test harness for running scenarios through amplifier-app-cli in Digital Twin Universe environments"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-eval-harness = "eval_harness.cli:main"
+amplifier-eval-harness = "eval_harness.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["eval_harness"]

@@ -1,6 +1,6 @@
 """Per-run flow: launch DTU, exec amplifier, pull session, destroy.
 
-The runner is intentionally synchronous and sequential in v0. Parallelism comes later.
+Each call to run_one() is independent and may run concurrently in a worker thread.
 """
 
 from __future__ import annotations
@@ -8,12 +8,12 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ._log import clear_prefix, log, set_prefix
 from .config import RunSpec
 from .gitea import GiteaSession
 from .profile import RenderedProfile, render_profile, write_profile
@@ -61,7 +61,7 @@ class RunResult:
 
 def _run_dtu(args: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess:
     cmd = ["amplifier-digital-twin", *args]
-    print(f"+ {' '.join(shlex.quote(c) for c in cmd)}", file=sys.stderr)
+    log(f"+ {' '.join(shlex.quote(c) for c in cmd)}")
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
@@ -82,12 +82,9 @@ def _launch_dtu(profile_path: Path, launch_vars: dict[str, str], *, timeout_s: i
         raise RuntimeError(
             f"DTU launch failed (rc={result.returncode}):\nSTDERR:\n{result.stderr}\nSTDOUT:\n{result.stdout}"
         )
-    # The launch command prints a JSON object to stdout; the last block is the launch info.
-    # Sometimes it emits provisioning logs to stderr first — only stdout is structured.
     try:
         info = json.loads(result.stdout)
     except json.JSONDecodeError:
-        # Try to find a JSON object in the output
         idx = result.stdout.rfind("{")
         if idx == -1:
             raise RuntimeError(f"Could not parse launch JSON from stdout:\n{result.stdout}") from None
@@ -104,14 +101,13 @@ def _wait_readiness(instance_id: str, *, max_attempts: int = 60, interval_s: flo
     for attempt in range(1, max_attempts + 1):
         result = _run_dtu(["check-readiness", instance_id])
         if result.returncode != 0:
-            print(f"  readiness check rc={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
+            log(f"  readiness check rc={result.returncode}: {result.stderr.strip()}")
         else:
             try:
                 info = json.loads(result.stdout)
                 if info.get("ready"):
                     return time.time() - t0
             except json.JSONDecodeError:
-                # If non-JSON, fall through to retry
                 pass
         if attempt == max_attempts:
             raise RuntimeError(f"DTU {instance_id} did not reach readiness in {max_attempts * interval_s:.0f}s")
@@ -123,9 +119,7 @@ def _push_workspace_fixture(instance_id: str, local_path: Path) -> None:
     """Push scenario workspace files into /workspace inside the DTU."""
     if not local_path.is_dir():
         return
-    # Use file-push (DTU CLI). Push contents of the local dir into /workspace/.
     args = ["file-push", instance_id]
-    # Glob the contents — we want /workspace/<file>, not /workspace/<dirname>/<file>.
     for entry in local_path.iterdir():
         args.append(str(entry))
     args.append("/workspace/")
@@ -141,12 +135,7 @@ def _exec_amplifier(
     prompt: str,
     timeout_s: int,
 ) -> tuple[int, str, str, float]:
-    """Run `amplifier run --bundle <name> --output-format json-trace "<prompt>"` inside the DTU.
-
-    Returns (exit_code, stdout, stderr, elapsed_seconds).
-
-    The DTU exec command in JSON mode returns {exit_code, stdout, stderr}, so we parse that.
-    """
+    """Run `amplifier run --bundle <name> --output-format json-trace "<prompt>"` inside the DTU."""
     inner = (
         f"export PATH=/root/.local/bin:$PATH && "
         f"cd /workspace && "
@@ -158,7 +147,6 @@ def _exec_amplifier(
     result = _run_dtu(args, timeout=timeout_s)
     elapsed = time.time() - t0
     if result.returncode != 0:
-        # The DTU exec command itself failed — distinct from the inner amplifier failing.
         raise RuntimeError(
             f"DTU exec failed (rc={result.returncode}). "
             f"This is an infrastructure failure, not amplifier behavior.\n"
@@ -183,8 +171,7 @@ def _file_pull_session(instance_id: str, dest_dir: Path) -> None:
     args = ["file-pull", instance_id, "/root/.amplifier/projects/", str(dest)]
     result = _run_dtu(args, timeout=300)
     if result.returncode != 0:
-        # Non-fatal; we still want the rest of the result.
-        print(f"  warning: file-pull failed (rc={result.returncode}): {result.stderr.strip()}", file=sys.stderr)
+        log(f"  warning: file-pull failed (rc={result.returncode}): {result.stderr.strip()}")
 
 
 def _destroy_dtu(instance_id: str) -> float:
@@ -193,7 +180,7 @@ def _destroy_dtu(instance_id: str) -> float:
     result = _run_dtu(["destroy", instance_id], timeout=180)
     elapsed = time.time() - t0
     if result.returncode != 0:
-        print(f"  warning: destroy failed (rc={result.returncode}): {result.stderr.strip()}", file=sys.stderr)
+        log(f"  warning: destroy failed (rc={result.returncode}): {result.stderr.strip()}")
     return elapsed
 
 
@@ -203,8 +190,20 @@ def _destroy_dtu(instance_id: str) -> float:
 
 
 def run_one(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResult:
-    """Execute one (bundle, scenario, run_index) combo. Always returns a RunResult,
-    even on failure (errors captured in result.error)."""
+    """Execute one (bundle, scenario, run_index) combo.
+
+    Always returns a RunResult, even on failure (errors captured in result.error).
+    Sets a thread-local log prefix so output remains attributable when this is
+    called from a worker thread under parallelism.
+    """
+    set_prefix(spec.run_id)
+    try:
+        return _run_one_inner(spec, gitea, run_dir)
+    finally:
+        clear_prefix()
+
+
+def _run_one_inner(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResult:
     run_dir.mkdir(parents=True, exist_ok=True)
     result = RunResult(run_id=spec.run_id, started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
     started_wall = time.time()
@@ -247,7 +246,6 @@ def run_one(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResult:
         try:
             result.json_trace = json.loads(stdout)
         except json.JSONDecodeError:
-            # Look for the last JSON object in stdout — UI noise can prefix it.
             idx = stdout.rfind("{")
             if idx >= 0:
                 try:
@@ -260,27 +258,18 @@ def run_one(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResult:
 
     except Exception as e:
         result.error = f"{type(e).__name__}: {e}"
-        print(f"  ERROR: {result.error}", file=sys.stderr)
+        log(f"  ERROR: {result.error}")
 
     finally:
-        # 7. Teardown — only destroy if we should
-        should_destroy = True
+        # 7. Teardown
         if instance_id is not None:
-            if result.error and spec.config.keep_dtu_on_failure:
-                should_destroy = False
-                print(
-                    f"  keeping DTU {instance_id} for postmortem (keep_dtu_on_failure=true)",
-                    file=sys.stderr,
-                )
-            elif not result.error and not spec.config.keep_dtu_on_success and not spec.config.keep_dtu_on_failure:
-                should_destroy = True
-            elif not result.error and spec.config.keep_dtu_on_success:
-                should_destroy = False
-                print(
-                    f"  keeping DTU {instance_id} (keep_dtu_on_success=true)",
-                    file=sys.stderr,
-                )
-            if should_destroy:
+            keep = (result.error and spec.config.keep_dtu_on_failure) or (
+                not result.error and spec.config.keep_dtu_on_success
+            )
+            if keep:
+                reason = "keep_dtu_on_failure" if result.error else "keep_dtu_on_success"
+                log(f"  keeping DTU {instance_id} ({reason}=true)")
+            else:
                 result.teardown_seconds = _destroy_dtu(instance_id)
 
         result.wall_clock_seconds = time.time() - started_wall

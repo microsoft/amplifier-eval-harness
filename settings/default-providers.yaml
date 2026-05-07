@@ -1,0 +1,55 @@
+# Default provider/model overlay for the eval harness.
+#
+# Lifted directly from the user's ~/.amplifier/settings.yaml (2026-05-06),
+# minus provider-chat-completions (which is local-only and not relevant
+# inside DTU containers).
+#
+# Deep-merged into the container's ~/.amplifier/settings.yaml at provision time.
+# All ${VAR} references are resolved at amplifier startup from the container's
+# environment, which the DTU profile populates via passthrough.services from
+# the host environment.
+#
+# To use a different model/provider mix, copy this file, edit, and point the
+# config's `settings_overlay:` at the new file.
+
+config:
+  providers:
+    - id: anthropic
+      module: provider-anthropic
+      source: git+https://github.com/microsoft/amplifier-module-provider-anthropic@main
+      config:
+        api_key: ${ANTHROPIC_API_KEY}
+        base_url: ${ANTHROPIC_BASE_URL}
+        default_model: claude-opus-4-7
+        enable_1m_context: 'true'
+        enable_prompt_caching: 'true'
+        fallback_cooldown_seconds: '300'
+        fallback_haiku_model: claude-haiku-4-5
+        fallback_on_overload: 'true'
+        fallback_retry_count: '2'
+        fallback_sonnet_model: claude-sonnet-4-6
+        persist_fallback_state: 'true'
+        priority: 1
+
+    - module: provider-gemini
+      source: git+https://github.com/microsoft/amplifier-module-provider-gemini@main
+      config:
+        api_key: ${GOOGLE_API_KEY}
+        default_model: gemini-3.1-flash-image-preview
+        priority: 6
+
+    - module: provider-github-copilot
+      source: git+https://github.com/microsoft/amplifier-module-provider-github-copilot@main
+      config:
+        github_token: ${GITHUB_TOKEN}
+        priority: 7
+
+    - module: provider-openai
+      source: git+https://github.com/microsoft/amplifier-module-provider-openai@main
+      config:
+        api_key: ${OPENAI_API_KEY}
+        base_url: ${OPENAI_BASE_URL}
+        default_model: gpt-5.5
+        enable_long_context: 'false'
+        priority: 13
+        reasoning_effort: high

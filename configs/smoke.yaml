@@ -1,40 +1,30 @@
 # Smoke config — inner-dev-loop
 #
-# 1 bundle × 1 scenario × 1 run. Smallest end-to-end check that the
-# harness, Gitea, profile rendering, DTU launch, and amplifier exec
-# all wire up correctly.
+# 1 bundle × 1 scenario × 1 run. Smallest end-to-end check.
 #
 # Run:
-#   eval-harness run --config configs/smoke.yaml
-#
-# Prerequisites:
-#   - ANTHROPIC_API_KEY set in the host environment
-#   - amplifier-gitea, amplifier-digital-twin, docker, incus all available
+#   amplifier-eval-harness run --config configs/smoke.yaml
 
-# Output dir is auto-derived as eval-results/smoke-<timestamp>/ if omitted.
-# output_dir: ./eval-results/smoke-latest
-
-# DTU profile (parameterized template). Resolves relative to this config.
 profile: ../profiles/eval-base.yaml.tmpl
 
-# Reasonable timeouts for a smoke run.
+# Sequential (parallelism=1) for the smoke run; switch to >1 for matrix runs.
+parallelism: 1
+
 launch_timeout_s: 600
 exec_timeout_s: 600
 
-# Keep the DTU around on failure so we can poke at it.
 keep_dtu_on_failure: true
 keep_dtu_on_success: false
 
 # Provider/model overlay deep-merged into the container's ~/.amplifier/settings.yaml.
-settings_overlay: ../settings/anthropic-claude-sonnet.yaml
+# default-providers.yaml is lifted from the user's actual ~/.amplifier/settings.yaml
+# (minus chat-completions, which is local-only).
+settings_overlay: ../settings/default-providers.yaml
 
-# Bundles. Each entry: name (used in `amplifier bundle add ... --name`), source.
 bundles:
   - name: foundation
     source: git+https://github.com/microsoft/amplifier-foundation@main
 
-# Scenarios. Shorthand: just the id. Looks for ../scenarios/<id>/prompt.md
-# and an optional ../scenarios/<id>/workspace/ directory.
 scenarios:
   - explain-repo
 

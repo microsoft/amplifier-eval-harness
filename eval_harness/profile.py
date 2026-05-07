@@ -6,11 +6,6 @@ What varies per-run is:
   - the set of url_rewrites rules (one per repo we want to redirect to Gitea)
   - whether pypi_overrides is present (only when amplifier-core is locally overridden)
   - whether settings_overlay deep-merge is included
-
-The template uses ${VAR} placeholders for things resolved at LAUNCH time
-(GITEA_URL, GITEA_TOKEN, BUNDLE_REPO, BUNDLE_NAME, SCENARIO_ID). Things resolved
-at RENDER time (the dynamic url_rewrites rules, optional pypi_overrides, optional
-settings overlay block) are spliced in here.
 """
 
 from __future__ import annotations
@@ -18,7 +13,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import EcosystemOverride, RunSpec
+from .config import RunSpec
+
+# Repos that are ALWAYS routed through Gitea (so the amplifier install inside the
+# DTU resolves to whatever we mirrored, not whatever upstream's HEAD is at the moment).
+ALWAYS_MIRROR_REPOS: tuple[tuple[str, str], ...] = (
+    ("microsoft", "amplifier"),
+    ("microsoft", "amplifier-app-cli"),
+)
 
 
 @dataclass
@@ -27,49 +29,57 @@ class RenderedProfile:
     launch_vars: dict[str, str]
 
 
+def all_repos_for_run(spec: RunSpec) -> list[tuple[str, str]]:
+    """Return the deduplicated list of (owner, name) repos that need to be in Gitea
+    for this run, in stable order (always-mirror first, then bundle, then overrides).
+
+    The amplifier-core override does NOT use url_rewrites — it's handled via
+    pypi_overrides instead — so it's excluded from the url_rewrites set returned
+    here, but still included in the populate-Gitea path elsewhere.
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+
+    def add(owner: str, name: str) -> None:
+        key = (owner, name)
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+
+    for owner, name in ALWAYS_MIRROR_REPOS:
+        add(owner, name)
+    add(spec.bundle.repo_owner, spec.bundle.repo_name)
+    for eco in spec.config.ecosystem_overrides:
+        if "/" in eco.repo:
+            owner, name = eco.repo.split("/", 1)
+        else:
+            owner, name = "microsoft", eco.repo
+        add(owner, name)
+    return out
+
+
 def _build_url_rewrites_rules(spec: RunSpec) -> str:
     """Produce the YAML lines under `url_rewrites.rules:` for this run.
 
-    Always includes a rule for the bundle. Adds rules for every ecosystem_override
-    EXCEPT amplifier-core (that goes through pypi_overrides).
+    Skips amplifier-core (handled by pypi_overrides). Deduplicated.
     """
     lines: list[str] = []
-
-    # Bundle rule
-    bundle_repo = spec.bundle.repo_name
-    lines.append(f"    - match: github.com/microsoft/{bundle_repo}")
-    lines.append(f"      target: ${{GITEA_URL}}/admin/{bundle_repo}")
-
-    # Ecosystem overrides (skip amplifier-core)
-    for eco in spec.config.ecosystem_overrides:
-        owner, name = eco.repo.split("/", 1) if "/" in eco.repo else ("microsoft", eco.repo)
+    for owner, name in all_repos_for_run(spec):
         if name == "amplifier-core":
             continue
         lines.append(f"    - match: github.com/{owner}/{name}")
         lines.append(f"      target: ${{GITEA_URL}}/admin/{name}")
-
-    # Always also redirect the amplifier entry-point and amplifier-app-cli through Gitea
-    # so the install-from-github inside the DTU goes through our mirror. This guarantees
-    # we're testing the version we mirrored, not whatever HEAD upstream has.
-    for repo in ("amplifier", "amplifier-app-cli"):
-        lines.append(f"    - match: github.com/microsoft/{repo}")
-        lines.append(f"      target: ${{GITEA_URL}}/admin/{repo}")
-
     return "\n".join(lines)
 
 
-def _build_pypi_overrides_block(eco_overrides: list[EcosystemOverride]) -> str:
-    """Produce the `pypi_overrides:` block when amplifier-core is in ecosystem_overrides.
-
-    Returns empty string if amplifier-core is NOT being overridden.
-    """
+def _build_pypi_overrides_block(spec: RunSpec) -> str:
+    """Produce the `pypi_overrides:` block when amplifier-core is in ecosystem_overrides."""
     core_override = next(
-        (e for e in eco_overrides if e.repo.split("/")[-1] == "amplifier-core"),
+        (e for e in spec.config.ecosystem_overrides if e.repo.split("/")[-1] == "amplifier-core"),
         None,
     )
     if core_override is None:
         return ""
-
     return """\
 pypi_overrides:
   packages:
@@ -85,10 +95,7 @@ pypi_overrides:
 
 
 def _build_settings_overlay_block(spec: RunSpec) -> tuple[str, str]:
-    """Return (provision_files_block, setup_cmd_block) for settings.yaml deep-merge.
-
-    Empty strings if no overlay is configured.
-    """
+    """Return (provision_files_block, setup_cmd_block) for settings.yaml deep-merge."""
     if spec.config.settings_overlay is None:
         return "", ""
 
@@ -116,8 +123,10 @@ def _build_settings_overlay_block(spec: RunSpec) -> tuple[str, str]:
               elif k in result and isinstance(result[k], list) and isinstance(v, list):
                   seen = set(); merged = []
                   for item in result[k] + v:
-                      key = json.dumps(item, sort_keys=True, default=str) if isinstance(item, (dict, list)) else (type(item).__name__, item)
-                      key = str(key)
+                      if isinstance(item, (dict, list)):
+                          key = json.dumps(item, sort_keys=True, default=str)
+                      else:
+                          key = f"{type(item).__name__}:{item}"
                       if key not in seen:
                           seen.add(key); merged.append(item)
                   result[k] = merged
@@ -133,7 +142,6 @@ def _build_settings_overlay_block(spec: RunSpec) -> tuple[str, str]:
       print("settings_overlay merged into /root/.amplifier/settings.yaml")
       PYEOF
 """
-
     return files_block, setup_cmd
 
 
@@ -142,7 +150,7 @@ def render_profile(spec: RunSpec, gitea_url: str, gitea_token: str) -> RenderedP
     template_text = spec.config.profile_template.read_text()
 
     url_rewrites_rules = _build_url_rewrites_rules(spec)
-    pypi_overrides_block = _build_pypi_overrides_block(spec.config.ecosystem_overrides)
+    pypi_overrides_block = _build_pypi_overrides_block(spec)
     overlay_files_block, overlay_setup_cmd = _build_settings_overlay_block(spec)
 
     rendered = (
@@ -155,6 +163,7 @@ def render_profile(spec: RunSpec, gitea_url: str, gitea_token: str) -> RenderedP
     launch_vars = {
         "GITEA_URL": gitea_url,
         "GITEA_TOKEN": gitea_token,
+        "BUNDLE_INSTALL_URL": spec.bundle.install_url(),
         "BUNDLE_REPO": spec.bundle.repo_name,
         "BUNDLE_NAME": spec.bundle.name,
         "SCENARIO_ID": spec.scenario.id,

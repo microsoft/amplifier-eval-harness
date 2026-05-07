@@ -1,7 +1,16 @@
 # Amplifier Eval Harness — Architecture
 
-**Status:** draft v0.1
+**Status:** draft v0.2
 **Last updated:** 2026-05-06
+
+## Changes since v0.1
+
+- CLI entry point renamed from `eval-harness` to `amplifier-eval-harness` (matches the package name).
+- **Parallelism shipped.** `parallelism: N` (or `--parallelism N`) caps concurrent DTUs via a `ThreadPoolExecutor`. Per-thread log prefixing keeps interleaved output attributable to its run id. Repo population still runs sequentially before the parallel run loop because Gitea is shared state.
+- `BundleSpec.source` parses `#subdirectory=<path>` fragments, supporting bundles like `amplifier-dev` that live as a single YAML file inside `amplifier-foundation/bundles/`. The fragment is preserved through the install URL inside the DTU, but the URL rewrite still keys on the bare repo name (so the same Gitea mirror serves any subdirectory bundle within the repo).
+- URL rewrite rules are now deduplicated across the bundle, ecosystem overrides, and always-mirror entries.
+- Default settings overlay is `settings/default-providers.yaml`, derived from the harness owner's `~/.amplifier/settings.yaml` with `provider-chat-completions` excluded (irrelevant inside DTUs).
+- Profile passthrough expanded to forward `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `GOOGLE_API_KEY`, `GITHUB_TOKEN`, `GH_TOKEN` alongside the existing API keys. Unset host vars are simply not forwarded — no error.
 
 ## Purpose
 
@@ -21,7 +30,7 @@ Used to:
 
 3. **Sparse → loaded.** A minimal config (1 bundle × 1 scenario × 1 run) is the default smoke shape. The same schema scales up to many bundles, scenarios, parallel runs, and ecosystem-level overrides without restructuring.
 
-4. **Sequential v0, parallel v1.** First version runs combos sequentially. Parallelism is a single config knob (`parallelism: N`) added later, gated on a launched-DTU pool.
+4. **Parallelism is a single config knob.** `parallelism: 1` runs sequentially (simpler logs, deterministic ordering); `parallelism: N` runs up to N DTUs concurrently via a thread pool. Each DTU is independent during the run loop; the only shared state is Gitea, which is populated sequentially before any DTU launches and read-only thereafter.
 
 5. **Raw evidence over judgment.** v0 captures raw artifacts (json-trace stdout, transcript.jsonl, metadata.json, wall clock, exit code) and per-combo summaries. Quality scoring / LLM-as-judge is a later layer that reads these artifacts.
 
@@ -116,9 +125,13 @@ bundles:
   - name: foundation
     source: git+https://github.com/microsoft/amplifier-foundation@main
   - name: amplifier-dev
-    source: git+https://github.com/microsoft/amplifier-foundation@main      # NOTE: amplifier-dev's actual source TBD
+    # amplifier-dev lives as a single YAML inside amplifier-foundation/bundles/.
+    # The #subdirectory= fragment is preserved end-to-end into `amplifier bundle add`.
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=bundles/amplifier-dev.yaml
   - name: my-experiment
     source: file://../amplifier-bundle-experiment    # local working tree → snapshot push
+    # Local sources can also use #subdirectory=, e.g.:
+    # source: file://../amplifier-foundation#subdirectory=bundles/my-experiment.yaml
 
 scenarios:
   - id: explain-repo
@@ -221,7 +234,6 @@ If `settings_overlay:` is set, the file is included in `provision.files` (pushed
 
 ## Open Questions
 
-- **amplifier-dev bundle source**: Confirmed location TBD. Configs reference its actual GitHub URL once known.
-- **Provider key forwarding**: v0 forwards `ANTHROPIC_API_KEY` from host via DTU `passthrough`. OpenAI/Azure additions follow the same pattern.
-- **Workspace fixture seeding**: scenarios with `workspace_path:` push that directory's contents into `/workspace` inside the DTU before `amplifier run`. Mechanism: `amplifier-digital-twin file-push <id> <local> /workspace/`.
-- **Parallel pool**: v1 design will use a bounded `asyncio.Semaphore` over launched DTUs. Each run is independent; only Gitea state is shared (and pre-built, read-mostly during runs).
+- **Workspace fixture seeding mechanism**: scenarios with `workspace_path:` push that directory's contents into `/workspace` inside the DTU via `amplifier-digital-twin file-push <id> <local> /workspace/`. Empirical verification on first smoke run.
+- **`amplifier-core` wheel cache**: when `amplifier-core` is in `ecosystem_overrides`, every run re-builds the wheel via `wheel_from_git`. A host-side wheel cache keyed on (repo, ref) would eliminate the rebuild for matrix runs that don't change core. Punted; not relevant until core overrides are exercised.
+- **Token / cost capture**: the amplifier CLI does not surface tokens or cost. Adding it would require core instrumentation (provider hook reading the API response usage) or post-hoc parsing of the per-provider HTTP transcript. Not in scope for v0.x; reconsider when the matrix size makes manual reading impractical.

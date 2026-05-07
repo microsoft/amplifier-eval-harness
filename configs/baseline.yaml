@@ -1,13 +1,19 @@
 # Baseline config — establish ground truth on existing bundles
 #
-# Multiple bundles × explain-repo × 3 runs each.
-# This is what you run BEFORE testing experimental bundles, so you can
-# compare experimental results against a known baseline distribution.
+# foundation + amplifier-dev × explain-repo × 3 runs. Run BEFORE testing
+# experimental bundles so you have a known baseline distribution to compare against.
+#
+# amplifier-dev lives inside amplifier-foundation/bundles/amplifier-dev.yaml,
+# referenced via the standard #subdirectory= URL fragment.
 #
 # Run:
-#   eval-harness run --config configs/baseline.yaml
+#   amplifier-eval-harness run --config configs/baseline.yaml
 
 profile: ../profiles/eval-base.yaml.tmpl
+
+# Both bundles × 3 runs = 6 combos. Bound by your machine's ability to run
+# multiple DTUs concurrently (~2 GB RAM each).
+parallelism: 2
 
 launch_timeout_s: 600
 exec_timeout_s: 900
@@ -15,14 +21,13 @@ exec_timeout_s: 900
 keep_dtu_on_failure: true
 keep_dtu_on_success: false
 
-settings_overlay: ../settings/anthropic-claude-sonnet.yaml
+settings_overlay: ../settings/default-providers.yaml
 
 bundles:
   - name: foundation
     source: git+https://github.com/microsoft/amplifier-foundation@main
-  # NOTE: confirm amplifier-dev's actual repo before enabling this row.
-  # - name: amplifier-dev
-  #   source: git+https://github.com/microsoft/amplifier-dev@main
+  - name: amplifier-dev
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=bundles/amplifier-dev.yaml
 
 scenarios:
   - explain-repo

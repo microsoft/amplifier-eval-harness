@@ -11,20 +11,21 @@ import json
 import os
 import shlex
 import subprocess
-import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from ._log import log
 
 
 @dataclass
 class GiteaSession:
     """A live Gitea instance + auth, used for the lifetime of one harness run."""
 
-    instance_id: str  # e.g. "gitea-a1b2c3d4"
-    port: int  # host port (e.g. 10110)
-    url: str  # "http://localhost:<port>" — passed to DTU as GITEA_URL var
-    token: str  # API token, valid for the harness session
+    instance_id: str
+    port: int
+    url: str
+    token: str
 
     @property
     def admin_user(self) -> str:
@@ -39,8 +40,7 @@ class GiteaSession:
 def _run(
     cmd: list[str], *, capture: bool = True, check: bool = True, cwd: Path | None = None
 ) -> subprocess.CompletedProcess:
-    """Run a command, raising on non-zero by default. Returns CompletedProcess."""
-    print(f"+ {' '.join(shlex.quote(c) for c in cmd)}", file=sys.stderr)
+    log(f"+ {' '.join(shlex.quote(c) for c in cmd)}")
     return subprocess.run(
         cmd,
         capture_output=capture,
@@ -51,8 +51,8 @@ def _run(
 
 
 def _run_shell(script: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    """Run a multi-line shell script via bash -lc."""
-    print(f"+ bash -lc <<<\n{script}", file=sys.stderr)
+    log("+ bash -lc <<<")
+    log(script.strip())
     return subprocess.run(
         ["bash", "-lc", script],
         capture_output=True,
@@ -68,12 +68,7 @@ def _run_shell(script: str, *, env: dict[str, str] | None = None) -> subprocess.
 
 
 def ensure_gitea(preferred_port: int = 10110) -> GiteaSession:
-    """Find an existing Gitea instance or create a new one. Always returns a fresh token.
-
-    Per amplifier-tester convention: reuse instances aggressively — don't churn
-    the Gitea container between harness sessions.
-    """
-    # Step 1: list existing
+    """Find an existing Gitea instance or create a new one. Always returns a fresh token."""
     result = _run(["amplifier-gitea", "list"], check=False)
     instances: list[dict] = []
     if result.returncode == 0 and result.stdout.strip():
@@ -88,22 +83,20 @@ def ensure_gitea(preferred_port: int = 10110) -> GiteaSession:
         first = instances[0]
         instance_id = first["id"]
         port = int(first.get("port", preferred_port))
-        print(f"Reusing existing Gitea instance: {instance_id} on port {port}", file=sys.stderr)
+        log(f"Reusing existing Gitea instance: {instance_id} on port {port}")
     else:
-        # Step 2: create
-        print(f"No existing Gitea instance found; creating one on port {preferred_port}...", file=sys.stderr)
+        log(f"No existing Gitea instance found; creating one on port {preferred_port}...")
         result = _run(["amplifier-gitea", "create", "--port", str(preferred_port)])
         created = json.loads(result.stdout)
         instance_id = created["id"]
         port = int(created.get("port", preferred_port))
-        # The create response includes a token, but we'll regenerate to be uniform.
 
-    # Step 3: generate a fresh token (works for both reuse and create paths)
+    # Generate a fresh token (uniform across reuse and create paths)
     result = _run(["amplifier-gitea", "token", instance_id])
-    token_data = json.loads(result.stdout)
-    token = token_data.get("token") or token_data.get("api_token")
-    if not token:
-        # Some versions return the token directly as a string
+    try:
+        token_data = json.loads(result.stdout)
+        token = token_data.get("token") or token_data.get("api_token") or result.stdout.strip()
+    except json.JSONDecodeError:
         token = result.stdout.strip()
 
     return GiteaSession(
@@ -132,19 +125,16 @@ def _gitea_repo_exists(session: GiteaSession, repo_name: str) -> bool:
 
 
 def mirror_from_github(session: GiteaSession, github_url: str, *, github_token: str | None = None) -> None:
-    """Mirror a GitHub repo to Gitea (one-shot snapshot, mirror=False).
-
-    Idempotent via existence check first.
-    """
+    """Mirror a GitHub repo to Gitea (one-shot snapshot, mirror=False). Idempotent."""
     repo_name = github_url.rstrip("/").split("/")[-1].removesuffix(".git")
     if _gitea_repo_exists(session, repo_name):
-        print(f"  → {repo_name} already in Gitea, skipping mirror.", file=sys.stderr)
+        log(f"  → {repo_name} already in Gitea, skipping mirror.")
         return
     cmd = ["amplifier-gitea", "mirror-from-github", session.instance_id, "--github-repo", github_url]
     if github_token:
         cmd.extend(["--github-token", github_token])
     _run(cmd)
-    print(f"  → mirrored {github_url} → admin/{repo_name}", file=sys.stderr)
+    log(f"  → mirrored {github_url} → admin/{repo_name}")
 
 
 def snapshot_push(session: GiteaSession, local_path: Path, repo_name: str) -> None:
@@ -160,26 +150,13 @@ def snapshot_push(session: GiteaSession, local_path: Path, repo_name: str) -> No
     if not (local_path / ".git").exists():
         raise RuntimeError(f"Not a git repo: {local_path}")
 
-    # Ensure the target Gitea repo exists (create if needed; we can't push to nothing).
-    # If admin/<repo_name> doesn't exist, create an empty one via API.
+    # Ensure the target Gitea repo exists (create empty if needed; we can't push to nothing).
     if not _gitea_repo_exists(session, repo_name):
-        create_cmd = [
-            "curl",
-            "-sf",
-            "-X",
-            "POST",
-            "-H",
-            f"Authorization: token {session.token}",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            json.dumps({"name": repo_name, "auto_init": False}),
+        for endpoint in (
             f"{session.url}/api/v1/admin/users/{session.admin_user}/repos",
-        ]
-        result = subprocess.run(create_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            # Try the user-scoped API as a fallback
-            create_cmd_alt = [
+            f"{session.url}/api/v1/user/repos",
+        ):
+            create_cmd = [
                 "curl",
                 "-sf",
                 "-X",
@@ -190,14 +167,17 @@ def snapshot_push(session: GiteaSession, local_path: Path, repo_name: str) -> No
                 "Content-Type: application/json",
                 "-d",
                 json.dumps({"name": repo_name, "auto_init": False}),
-                f"{session.url}/api/v1/user/repos",
+                endpoint,
             ]
-            result = subprocess.run(create_cmd_alt, capture_output=True, text=True, check=True)
-        print(f"  → created empty admin/{repo_name} in Gitea", file=sys.stderr)
+            r = subprocess.run(create_cmd, capture_output=True, text=True)
+            if r.returncode == 0:
+                log(f"  → created empty admin/{repo_name} in Gitea (via {endpoint.split('/api')[-1]})")
+                break
+        else:
+            raise RuntimeError(f"Could not create empty admin/{repo_name} in Gitea via any endpoint.")
 
     with tempfile.TemporaryDirectory(prefix="eval-harness-snap-") as tmp:
         snap = Path(tmp) / repo_name
-        # The bash here is a literal port of amplifier-tester's snapshot procedure.
         script = f"""
 set -euo pipefail
 SRC={shlex.quote(str(local_path))}
@@ -226,7 +206,7 @@ git remote add gitea "$(echo "$GITEA_URL" | sed -E 's|^http://|http://admin:'"$G
 git push gitea HEAD:main --force
 """
         _run_shell(script)
-    print(f"  → snapshot-pushed {local_path} → admin/{repo_name}", file=sys.stderr)
+    log(f"  → snapshot-pushed {local_path} → admin/{repo_name}")
 
 
 def populate_repo(session: GiteaSession, *, repo_owner: str, repo_name: str, local_path: Path | None) -> None:
@@ -239,6 +219,5 @@ def populate_repo(session: GiteaSession, *, repo_owner: str, repo_name: str, loc
         snapshot_push(session, local_path, repo_name)
     else:
         github_url = f"https://github.com/{repo_owner}/{repo_name}"
-        # Try to use gh's token for private/rate-limit avoidance.
         gh_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
         mirror_from_github(session, github_url, github_token=gh_token)

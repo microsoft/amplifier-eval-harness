@@ -1,17 +1,18 @@
 # eval-harness DTU profile template
 #
 # Rendered per-run by eval_harness.profile.render_profile():
-#   - {{ URL_REWRITES_RULES }}    -- spliced in (one rule per repo we route through Gitea)
-#   - {{ PYPI_OVERRIDES }}        -- spliced in only when amplifier-core is locally overridden
-#   - {{ SETTINGS_OVERLAY_FILES }} -- spliced in only when settings_overlay is configured
+#   - {{ URL_REWRITES_RULES }}        -- spliced in: one rule per repo we route through Gitea
+#   - {{ PYPI_OVERRIDES }}            -- spliced in only when amplifier-core is locally overridden
+#   - {{ SETTINGS_OVERLAY_FILES }}    -- spliced in only when settings_overlay is configured
 #   - {{ SETTINGS_OVERLAY_SETUP_CMD }} -- spliced in only when settings_overlay is configured
 #
 # Resolved at LAUNCH time via --var:
-#   GITEA_URL              http://localhost:<port>  (auto-rewritten to host gateway IP inside the container)
+#   GITEA_URL              http://localhost:<port> (auto-rewritten to host gateway IP)
 #   GITEA_TOKEN            API token for Gitea
-#   BUNDLE_REPO            repo name of the bundle under test (e.g. amplifier-foundation)
-#   BUNDLE_NAME            short name used in `amplifier bundle add ... --name` and `amplifier bundle use`
-#   SCENARIO_ID            scenario short id (used in DTU instance name)
+#   BUNDLE_INSTALL_URL     full git+https URL (incl. #subdirectory= if any) for `amplifier bundle add`
+#   BUNDLE_REPO            repo name of the bundle (used in name + url_rewrites)
+#   BUNDLE_NAME            short alias passed via --name to `amplifier bundle add`
+#   SCENARIO_ID            scenario short id
 #   AMPLIFIER_INSTALL_REF  branch/SHA of microsoft/amplifier to install (default: main)
 
 name: eval-${BUNDLE_NAME}-${SCENARIO_ID}
@@ -33,16 +34,27 @@ url_rewrites:
 # ---- pypi_overrides (only when amplifier-core is locally overridden) ------
 {{ PYPI_OVERRIDES }}
 
-# ---- passthrough: forward provider API keys from host ---------------------
+# ---- passthrough: forward provider API keys + base URLs from host ---------
+# Listed env vars that are unset on the host are simply not forwarded — no error.
 passthrough:
   allow_external: true
   services:
-    - name: anthropic
+    - name: anthropic-key
       key_env: ANTHROPIC_API_KEY
-    - name: openai
+    - name: anthropic-base-url
+      key_env: ANTHROPIC_BASE_URL
+    - name: openai-key
       key_env: OPENAI_API_KEY
-    - name: azure-openai
+    - name: openai-base-url
+      key_env: OPENAI_BASE_URL
+    - name: azure-openai-key
       key_env: AZURE_OPENAI_API_KEY
+    - name: google-key
+      key_env: GOOGLE_API_KEY
+    - name: github-token
+      key_env: GITHUB_TOKEN
+    - name: gh-token
+      key_env: GH_TOKEN
 
 # ---- provision: install amplifier + bundle, optionally merge settings -----
 provision:
@@ -57,27 +69,25 @@ provision:
       export PATH="/root/.local/bin:$PATH"
       uv tool install git+https://github.com/microsoft/amplifier@${AMPLIFIER_INSTALL_REF}
 
-    # 3. Write base settings.yaml (provider config). The provider module URL is
-    #    auto-rewritten by mitmproxy if its repo is in url_rewrites.
+    # 3. Write empty settings.yaml stub (will be deep-merged with overlay if configured)
     - |
       mkdir -p /root/.amplifier
       if [ ! -f /root/.amplifier/settings.yaml ]; then
         cat > /root/.amplifier/settings.yaml << 'EOF'
-      # Base settings stub. settings_overlay deep-merges over this.
-      # Providers are typically configured by the bundle itself; if not,
-      # rely on auto_init_from_env() to pick up ANTHROPIC_API_KEY etc.
+      # Placeholder; deep-merged with settings_overlay (if any) in the next step.
       EOF
       fi
 
     # 4. (Optional) Deep-merge settings overlay if one was provided
 {{ SETTINGS_OVERLAY_SETUP_CMD }}
 
-    # 5. Add the bundle under test (NO --app: standalone bundle, project-local)
+    # 5. Add the bundle under test (NO --app: standalone bundle, project-local).
+    #    BUNDLE_INSTALL_URL preserves any #subdirectory= fragment from the source.
     - |
       export PATH="/root/.local/bin:$PATH"
       mkdir -p /workspace
       cd /workspace
-      amplifier bundle add git+https://github.com/microsoft/${BUNDLE_REPO}@main --name ${BUNDLE_NAME}
+      amplifier bundle add ${BUNDLE_INSTALL_URL} --name ${BUNDLE_NAME}
       amplifier bundle use ${BUNDLE_NAME}
 
     # 6. Sanity checks

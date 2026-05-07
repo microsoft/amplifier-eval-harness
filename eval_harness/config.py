@@ -16,26 +16,37 @@ from typing import Any
 import yaml
 
 # ---------------------------------------------------------------------------
-# Data classes
+# Source-URL parsers
 # ---------------------------------------------------------------------------
 
-# Pattern for a microsoft GitHub repo URL like git+https://github.com/microsoft/<repo>@<ref>
-_GIT_GITHUB_RE = re.compile(r"^git\+https://github\.com/(?P<owner>[^/]+)/(?P<name>[^@]+?)(?:@(?P<ref>.+))?$")
-# Pattern for a local-path source like file:///abs/path or file://./relative
-_FILE_RE = re.compile(r"^file://(?P<path>.+)$")
+# git+https://github.com/<owner>/<repo>[@<ref>][#subdirectory=<path>]
+_GIT_GITHUB_RE = re.compile(
+    r"^git\+https://github\.com/(?P<owner>[^/]+)/(?P<name>[^@/#]+?)"
+    r"(?:@(?P<ref>[^#]+))?"
+    r"(?:#subdirectory=(?P<subdir>.+))?$"
+)
+
+# file://<local-path>[#subdirectory=<path>]
+_FILE_RE = re.compile(r"^file://(?P<path>[^#]+)(?:#subdirectory=(?P<subdir>.+))?$")
+
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
 
 
 @dataclass
 class BundleSpec:
-    """A bundle to test. Source is either upstream git or a local working tree."""
+    """A bundle to test. Source is upstream git or a local working tree, with optional subdirectory."""
 
-    name: str  # the bundle name, used in `amplifier bundle add ... --name <name>` and `amplifier bundle use <name>`
-    source: str  # "git+https://github.com/microsoft/<repo>@<ref>" OR "file://<local-path>"
+    name: str  # used in `amplifier bundle add ... --name <name>` and `amplifier bundle use <name>`
+    source: str  # "git+https://..." | "file://..."
 
     # Derived in __post_init__:
     repo_owner: str = ""
     repo_name: str = ""
     git_ref: str = "main"
+    subdirectory: str | None = None  # path within the repo (e.g. "bundles/amplifier-dev.yaml")
     local_path: Path | None = None
     is_local: bool = False
 
@@ -45,6 +56,7 @@ class BundleSpec:
             self.repo_owner = m.group("owner")
             self.repo_name = m.group("name").rstrip("/").removesuffix(".git")
             self.git_ref = m.group("ref") or "main"
+            self.subdirectory = m.group("subdir")
             self.is_local = False
             return
         m = _FILE_RE.match(self.source)
@@ -55,12 +67,25 @@ class BundleSpec:
             self.repo_name = self.local_path.name
             self.repo_owner = "microsoft"  # synthetic — Gitea always uses admin/<repo-name>
             self.git_ref = "main"
+            self.subdirectory = m.group("subdir")
             self.is_local = True
             return
         raise ValueError(
-            f"BundleSpec.source must be 'git+https://github.com/<owner>/<repo>[@ref]' or "
-            f"'file://<local-path>', got: {self.source!r}"
+            f"BundleSpec.source must be 'git+https://github.com/<owner>/<repo>[@ref][#subdirectory=<path>]' "
+            f"or 'file://<local-path>[#subdirectory=<path>]', got: {self.source!r}"
         )
+
+    def install_url(self) -> str:
+        """Reconstruct the install URL passed to `amplifier bundle add ...`.
+
+        Inside a DTU we always install via git+https (mitmproxy redirects it to Gitea).
+        Local sources are routed via Gitea after the snapshot push, so the install
+        URL is always the github form, regardless of `is_local`.
+        """
+        url = f"git+https://github.com/{self.repo_owner}/{self.repo_name}@{self.git_ref}"
+        if self.subdirectory:
+            url = f"{url}#subdirectory={self.subdirectory}"
+        return url
 
 
 @dataclass
@@ -92,7 +117,7 @@ class RunConfig:
     config_path: Path  # absolute path to the YAML this was loaded from
     output_dir: Path  # where eval-results/ goes for this run
     profile_template: Path  # path to the parameterized DTU profile template
-    parallelism: int = 1  # v0: always 1
+    parallelism: int = 1  # 1 = sequential; N > 1 = up to N concurrent DTUs
     amplifier_install_ref: str = "main"
     launch_timeout_s: int = 600
     exec_timeout_s: int = 900
@@ -156,12 +181,10 @@ def load_config(config_path: str | Path) -> RunConfig:
     if "profile" in raw:
         profile_template = _resolve(raw["profile"], base)
     else:
-        # Look for it next to the config (../profiles/...) — typical repo layout.
         candidate = base.parent / "profiles" / "eval-base.yaml.tmpl"
         if candidate.is_file():
             profile_template = candidate.resolve()
         else:
-            # Fall back to package data (when installed via pip/uv tool).
             pkg_root = Path(__file__).parent
             profile_template = (pkg_root / "_data" / "profiles" / "eval-base.yaml.tmpl").resolve()
 
@@ -184,6 +207,8 @@ def load_config(config_path: str | Path) -> RunConfig:
         if m and not Path(m.group("path")).is_absolute():
             resolved_local = _resolve(m.group("path"), base)
             source = f"file://{resolved_local}"
+            if m.group("subdir"):
+                source = f"{source}#subdirectory={m.group('subdir')}"
         bundles.append(BundleSpec(name=entry["name"], source=source))
 
     if not bundles:
@@ -193,7 +218,6 @@ def load_config(config_path: str | Path) -> RunConfig:
     scenarios: list[ScenarioSpec] = []
     for entry in raw.get("scenarios") or []:
         if isinstance(entry, str):
-            # Shorthand: just the id. Look for scenarios/<id>/prompt.md and scenarios/<id>/workspace/.
             sid = entry
             sdir = base.parent / "scenarios" / sid
             scenarios.append(
@@ -221,11 +245,15 @@ def load_config(config_path: str | Path) -> RunConfig:
     if not scenarios:
         raise ValueError("Config must define at least one scenario.")
 
+    parallelism = int(raw.get("parallelism", 1))
+    if parallelism < 1:
+        raise ValueError(f"parallelism must be >= 1, got {parallelism!r}")
+
     return RunConfig(
         config_path=config_path,
         output_dir=output_dir,
         profile_template=profile_template,
-        parallelism=int(raw.get("parallelism", 1)),
+        parallelism=parallelism,
         amplifier_install_ref=str(raw.get("amplifier_install_ref", "main")),
         launch_timeout_s=int(raw.get("launch_timeout_s", 600)),
         exec_timeout_s=int(raw.get("exec_timeout_s", 900)),
