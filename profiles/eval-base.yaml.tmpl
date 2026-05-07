@@ -61,8 +61,12 @@ passthrough:
 provision:
 {{ SETTINGS_OVERLAY_FILES }}
   setup_cmds:
-    # 1. System deps + uv installer
-    - apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates
+    # 1. System deps + uv installer.
+    #    pytest + python3-pip are pre-installed so test/refactor/fix scenarios
+    #    can run pytest directly without each prompt having to bootstrap them.
+    - apt-get update && apt-get install -y --no-install-recommends
+        git curl ca-certificates
+        python3 python3-pip python3-pytest
     - curl -LsSf https://astral.sh/uv/install.sh | sh
 
     # 2. Install amplifier from upstream (intercepted by mitmproxy and redirected to Gitea)

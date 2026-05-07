@@ -31,6 +31,10 @@ packages = ["amplifier_eval_harness"]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
+# Scenario fixtures are intentionally buggy / partial / unidiomatic — they're
+# the inputs the harness presents to the model, not first-class harness code.
+# Don't lint them.
+extend-exclude = ["scenarios/", "eval-results/", ".eval-tmp/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]

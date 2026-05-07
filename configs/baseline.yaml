@@ -1,20 +1,29 @@
-# Baseline config — establish ground truth on existing bundles
+# Baseline — establish ground-truth distributions on existing bundles
 #
-# foundation + amplifier-dev × explain-repo × 3 runs. Run BEFORE testing
-# experimental bundles so you have a known baseline distribution to compare against.
+# 2 bundles × 6 scenarios × 3 runs = 36 runs. Run BEFORE testing
+# experimental bundles so you have a known baseline to compare against.
+# At parallelism=2 this takes roughly 40-50 min wall on a workstation
+# (each run averages ~140s, two run concurrently).
 #
-# amplifier-dev lives inside amplifier-foundation/bundles/amplifier-dev.yaml,
-# referenced via the standard #subdirectory= URL fragment.
+# Scenario mix:
+#   - explain-repo:       file reading + summarization (read-only)
+#   - fix-failing-test:   full debug loop (read + edit + bash verify)
+#   - refactor-extract:   multi-edit transformation, behavior preserved
+#   - plan-feature:       planning, no code (read-only reasoning)
+#   - write-tests:        test authoring against a real implementation
+#   - bug-hunt-readonly:  diagnosis without fix (read-only static analysis)
+#
+# Bundle mix:
+#   - foundation:    base bundle (file ops, delegation, no shell access)
+#   - amplifier-dev: foundation + amplifier-tester transitively (shell
+#                    access via bash, more bundles loaded)
 #
 # Run:
 #   amplifier-eval-harness run --config configs/baseline.yaml
 
 profile: ../profiles/eval-base.yaml.tmpl
 
-# Both bundles × 3 runs = 6 combos. Bound by your machine's ability to run
-# multiple DTUs concurrently (~2 GB RAM each).
 parallelism: 2
-
 launch_timeout_s: 600
 exec_timeout_s: 900
 
@@ -31,5 +40,10 @@ bundles:
 
 scenarios:
   - explain-repo
+  - fix-failing-test
+  - refactor-extract
+  - plan-feature
+  - write-tests
+  - bug-hunt-readonly
 
 runs_per_combo: 3

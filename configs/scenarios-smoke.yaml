@@ -1,0 +1,35 @@
+# Scenarios smoke — exercise every scenario once with one bundle
+#
+# 1 bundle × 6 scenarios × 1 run = 6 runs. Inner-dev-loop check that
+# every scenario fixture works end-to-end (workspace seeding, prompt
+# clarity, success path produces a non-empty json-trace). Use this
+# right after editing scenarios; use baseline.yaml when establishing
+# distributions across bundles.
+#
+# Run:
+#   amplifier-eval-harness run --config configs/scenarios-smoke.yaml
+
+profile: ../profiles/eval-base.yaml.tmpl
+
+parallelism: 2
+launch_timeout_s: 600
+exec_timeout_s: 900
+
+keep_dtu_on_failure: true
+keep_dtu_on_success: false
+
+settings_overlay: ../settings/default-providers.yaml
+
+bundles:
+  - name: foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main
+
+scenarios:
+  - explain-repo
+  - fix-failing-test
+  - refactor-extract
+  - plan-feature
+  - write-tests
+  - bug-hunt-readonly
+
+runs_per_combo: 1
