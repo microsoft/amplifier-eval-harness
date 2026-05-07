@@ -65,6 +65,31 @@ def _run_dtu(args: list[str], *, timeout: int | None = None) -> subprocess.Compl
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
+def _extract_json_trace(stdout: str) -> dict[str, Any] | None:
+    """Parse the json-trace from amplifier's stdout.
+
+    The full payload is a single top-level JSON object. Provisioning logs or
+    banners that get prefixed onto stdout would break a naive json.loads, so
+    locate the first `{` and parse from there. The last `{` is wrong — it's
+    just the start of the nested `metadata` object.
+    """
+    text = stdout.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        first = text.find("{")
+        if first < 0:
+            return None
+        try:
+            # Use raw_decode so we don't choke on trailing newlines or extra logs.
+            obj, _ = json.JSONDecoder().raw_decode(text[first:])
+            return obj if isinstance(obj, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+
 # ---------------------------------------------------------------------------
 # Core operations
 # ---------------------------------------------------------------------------
@@ -242,16 +267,11 @@ def _run_one_inner(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResu
         result.raw_stderr = stderr
         result.exec_seconds = exec_elapsed
 
-        # Try to parse json-trace
-        try:
-            result.json_trace = json.loads(stdout)
-        except json.JSONDecodeError:
-            idx = stdout.rfind("{")
-            if idx >= 0:
-                try:
-                    result.json_trace = json.loads(stdout[idx:])
-                except json.JSONDecodeError:
-                    result.json_trace = None
+        # Try to parse json-trace. Strip leading non-JSON noise (banners,
+        # provisioning logs) before falling back. NOTE: use the FIRST `{`
+        # not the last — the trace is a single top-level object, and the
+        # last `{` is just the metadata object nested inside it.
+        result.json_trace = _extract_json_trace(stdout)
 
         # 6. Pull session files
         _file_pull_session(instance_id, run_dir)

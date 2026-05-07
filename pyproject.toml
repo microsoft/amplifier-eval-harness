@@ -17,16 +17,16 @@ dependencies = [
 ]
 
 [project.scripts]
-amplifier-eval-harness = "eval_harness.cli:main"
+amplifier-eval-harness = "amplifier_eval_harness.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["eval_harness"]
+packages = ["amplifier_eval_harness"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"profiles" = "eval_harness/_data/profiles"
-"configs" = "eval_harness/_data/configs"
-"scenarios" = "eval_harness/_data/scenarios"
-"settings" = "eval_harness/_data/settings"
+"profiles" = "amplifier_eval_harness/_data/profiles"
+"configs" = "amplifier_eval_harness/_data/configs"
+"scenarios" = "amplifier_eval_harness/_data/scenarios"
+"settings" = "amplifier_eval_harness/_data/settings"
 
 [tool.ruff]
 line-length = 120

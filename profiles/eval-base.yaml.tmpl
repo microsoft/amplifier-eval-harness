@@ -32,6 +32,15 @@ url_rewrites:
 
 # ---- passthrough: forward provider API keys + base URLs from host ---------
 # Listed env vars that are unset on the host are simply not forwarded.
+#
+# DELIBERATELY NOT FORWARDED: GH_TOKEN, GITHUB_TOKEN.
+# When those are set inside the DTU, uv/git inside the container will use
+# them to authenticate clones to github.com — and if the token's permissions
+# don't include the public microsoft/* repos (or are otherwise invalid in
+# this context), GitHub returns 404 ("Repository not found") for every
+# unauthenticated-equivalent request. Anonymous clones of public repos
+# (the case for amplifier-module-provider-*, etc.) work reliably.
+# This matches the amplifier-tester self-validation profile pattern.
 passthrough:
   allow_external: true
   services:
@@ -47,10 +56,6 @@ passthrough:
       key_env: AZURE_OPENAI_API_KEY
     - name: google-key
       key_env: GOOGLE_API_KEY
-    - name: github-token
-      key_env: GITHUB_TOKEN
-    - name: gh-token
-      key_env: GH_TOKEN
 
 # ---- provision: install amplifier + bundle, optionally merge settings -----
 provision:

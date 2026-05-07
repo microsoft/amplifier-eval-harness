@@ -15,12 +15,23 @@ from pathlib import Path
 
 from .config import RunSpec
 
-# Repos that are ALWAYS routed through Gitea (so the amplifier install inside the
-# DTU resolves to whatever we mirrored, not whatever upstream's HEAD is at the moment).
-ALWAYS_MIRROR_REPOS: tuple[tuple[str, str], ...] = (
-    ("microsoft", "amplifier"),
-    ("microsoft", "amplifier-app-cli"),
-)
+# Repos that are ALWAYS routed through Gitea.
+#
+# Empty by default. We rely on mitmproxy's pass-through behavior for upstream
+# GitHub: anything not in url_rewrites passes to real github.com unmodified,
+# and the public microsoft/* repos clone fine without auth.
+#
+# DELIBERATELY NOT INCLUDED: ("microsoft", "amplifier"). The currently
+# installed `amplifier-digital-twin` engine ships a prefix-only matcher
+# (`path.startswith(rule['match_path_prefix'])`) — `default_match_mode: boundary`
+# in the profile YAML is parsed but not enforced. A `microsoft/amplifier` rule
+# silently captures every `microsoft/amplifier-*` URL (e.g. provider modules)
+# and redirects them to Gitea where they don't exist (404). Verified by reading
+# `/opt/dtu/rewrite_addon.py` inside a running DTU and matching mitmdump logs.
+#
+# When the boundary matcher reaches the engine, this can hold any narrow rules
+# we want to pin. Until then: keep the rule set sparse to avoid prefix collisions.
+ALWAYS_MIRROR_REPOS: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass

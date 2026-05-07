@@ -10,7 +10,6 @@ from pathlib import Path
 
 import click
 
-from . import __version__
 from ._log import log
 from .config import RunConfig, expand_matrix, load_config, validate_paths
 from .gitea import GiteaSession, ensure_gitea, populate_repo
@@ -60,7 +59,7 @@ def _resolve_repos_to_populate(config: RunConfig) -> list[tuple[str, str, Path |
 
 
 @click.group()
-@click.version_option(version=__version__, prog_name="amplifier-eval-harness")
+@click.version_option()
 def main() -> None:
     """Run scenarios through amplifier-app-cli inside DTU containers."""
 
