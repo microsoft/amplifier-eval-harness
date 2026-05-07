@@ -21,16 +21,20 @@ from .config import RunSpec
 # GitHub: anything not in url_rewrites passes to real github.com unmodified,
 # and the public microsoft/* repos clone fine without auth.
 #
-# DELIBERATELY NOT INCLUDED: ("microsoft", "amplifier"). The currently
-# installed `amplifier-digital-twin` engine ships a prefix-only matcher
-# (`path.startswith(rule['match_path_prefix'])`) — `default_match_mode: boundary`
-# in the profile YAML is parsed but not enforced. A `microsoft/amplifier` rule
-# silently captures every `microsoft/amplifier-*` URL (e.g. provider modules)
-# and redirects them to Gitea where they don't exist (404). Verified by reading
-# `/opt/dtu/rewrite_addon.py` inside a running DTU and matching mitmdump logs.
+# DELIBERATELY NOT INCLUDED: ("microsoft", "amplifier"). The matcher's prefix
+# semantics mean a `microsoft/amplifier` rule silently captures every
+# `microsoft/amplifier-*` URL (provider modules, foundation, etc.) and
+# redirects them to Gitea where many don't exist (404). Verified by reading
+# /opt/dtu/rewrite_addon.py inside a running DTU and matching mitmdump logs.
 #
-# When the boundary matcher reaches the engine, this can hold any narrow rules
-# we want to pin. Until then: keep the rule set sparse to avoid prefix collisions.
+# `amplifier-bundle-digital-twin-universe` v0.2.0 (PR #7, 2026-05-05) added a
+# `default_match_mode: boundary` feature that fixes this — the matcher then
+# requires the prefix to terminate at /, ., ?, #, or end-of-path, and a dash
+# is no longer a valid continuation. With v0.2.0+ installed AND
+# `default_match_mode: boundary` set in the profile (which we already do in
+# eval-base.yaml.tmpl), this list could safely include `microsoft/amplifier`.
+# We keep it empty for compatibility with older DTU installs and because the
+# pass-through approach is simpler and matches amplifier-tester's pattern.
 ALWAYS_MIRROR_REPOS: tuple[tuple[str, str], ...] = ()
 
 

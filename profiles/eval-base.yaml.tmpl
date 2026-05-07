@@ -34,13 +34,13 @@ url_rewrites:
 # Listed env vars that are unset on the host are simply not forwarded.
 #
 # DELIBERATELY NOT FORWARDED: GH_TOKEN, GITHUB_TOKEN.
-# When those are set inside the DTU, uv/git inside the container will use
-# them to authenticate clones to github.com — and if the token's permissions
-# don't include the public microsoft/* repos (or are otherwise invalid in
-# this context), GitHub returns 404 ("Repository not found") for every
-# unauthenticated-equivalent request. Anonymous clones of public repos
-# (the case for amplifier-module-provider-*, etc.) work reliably.
-# This matches the amplifier-tester self-validation profile pattern.
+# Public microsoft/* repos clone fine anonymously, and the rewritten URLs
+# (Gitea) get their auth from url_rewrites.auth. Forwarding GitHub creds
+# isn't needed and adds surface area. This matches the amplifier-tester
+# self-validation profile pattern.
+# (Earlier diagnostics in this harness wrongly attributed a 404 cascade
+# to GH_TOKEN — the real cause was a prefix-collision bug in url_rewrites,
+# not the token. See ALWAYS_MIRROR_REPOS in profile.py for the real fix.)
 passthrough:
   allow_external: true
   services:

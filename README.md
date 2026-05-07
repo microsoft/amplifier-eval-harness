@@ -14,7 +14,9 @@ Runs `bundles × scenarios × runs` matrices in isolated containers, captures pe
 # Prerequisites:
 #   - amplifier CLI installed (uv tool install git+https://github.com/microsoft/amplifier)
 #   - amplifier-bundle-gitea (provides amplifier-gitea CLI)
-#   - amplifier-bundle-digital-twin-universe (provides amplifier-digital-twin CLI)
+#   - amplifier-bundle-digital-twin-universe v0.2.0+ (provides amplifier-digital-twin CLI).
+#       v0.1.x silently ignores `default_match_mode: boundary`; URL prefix collisions
+#       with sibling repos can over-match. PR #7 (merged 2026-05-05) fixes it.
 #   - Docker running (for Gitea container) + Incus (for DTU containers)
 #   - At least one provider env var set (ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, GITHUB_TOKEN…)
 
