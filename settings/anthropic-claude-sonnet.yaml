@@ -1,0 +1,20 @@
+# Provider/model overlay — Anthropic Claude Sonnet
+#
+# Deep-merged into the container's ~/.amplifier/settings.yaml at provision time.
+# Use this overlay for runs where you want Anthropic's claude-sonnet-X as the model.
+#
+# The bundle being tested may already configure providers; this overlay either
+# supplements or overrides those settings depending on the deep-merge.
+#
+# References:
+#   - https://github.com/microsoft/amplifier-module-provider-anthropic
+#   - amplifier docs on settings.yaml schema
+
+config:
+  providers:
+    - module: provider-anthropic
+      source: git+https://github.com/microsoft/amplifier-module-provider-anthropic@main
+      config:
+        model: claude-sonnet-4-5-20250929
+        api_key_env: ANTHROPIC_API_KEY
+        max_tokens: 8192

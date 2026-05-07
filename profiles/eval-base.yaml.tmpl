@@ -1,0 +1,101 @@
+# eval-harness DTU profile template
+#
+# Rendered per-run by eval_harness.profile.render_profile():
+#   - {{ URL_REWRITES_RULES }}    -- spliced in (one rule per repo we route through Gitea)
+#   - {{ PYPI_OVERRIDES }}        -- spliced in only when amplifier-core is locally overridden
+#   - {{ SETTINGS_OVERLAY_FILES }} -- spliced in only when settings_overlay is configured
+#   - {{ SETTINGS_OVERLAY_SETUP_CMD }} -- spliced in only when settings_overlay is configured
+#
+# Resolved at LAUNCH time via --var:
+#   GITEA_URL              http://localhost:<port>  (auto-rewritten to host gateway IP inside the container)
+#   GITEA_TOKEN            API token for Gitea
+#   BUNDLE_REPO            repo name of the bundle under test (e.g. amplifier-foundation)
+#   BUNDLE_NAME            short name used in `amplifier bundle add ... --name` and `amplifier bundle use`
+#   SCENARIO_ID            scenario short id (used in DTU instance name)
+#   AMPLIFIER_INSTALL_REF  branch/SHA of microsoft/amplifier to install (default: main)
+
+name: eval-${BUNDLE_NAME}-${SCENARIO_ID}
+description: >
+  Eval run for bundle ${BUNDLE_NAME} (${BUNDLE_REPO}), scenario ${SCENARIO_ID}.
+
+base:
+  image: ubuntu:24.04
+
+# ---- url_rewrites: redirect github.com -> Gitea ---------------------------
+url_rewrites:
+  auth:
+    username: admin
+    token_var: GITEA_TOKEN
+  default_match_mode: boundary
+  rules:
+{{ URL_REWRITES_RULES }}
+
+# ---- pypi_overrides (only when amplifier-core is locally overridden) ------
+{{ PYPI_OVERRIDES }}
+
+# ---- passthrough: forward provider API keys from host ---------------------
+passthrough:
+  allow_external: true
+  services:
+    - name: anthropic
+      key_env: ANTHROPIC_API_KEY
+    - name: openai
+      key_env: OPENAI_API_KEY
+    - name: azure-openai
+      key_env: AZURE_OPENAI_API_KEY
+
+# ---- provision: install amplifier + bundle, optionally merge settings -----
+provision:
+{{ SETTINGS_OVERLAY_FILES }}
+  setup_cmds:
+    # 1. System deps + uv installer
+    - apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates
+    - curl -LsSf https://astral.sh/uv/install.sh | sh
+
+    # 2. Install amplifier from upstream (intercepted by mitmproxy + redirected to Gitea)
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      uv tool install git+https://github.com/microsoft/amplifier@${AMPLIFIER_INSTALL_REF}
+
+    # 3. Write base settings.yaml (provider config). The provider module URL is
+    #    auto-rewritten by mitmproxy if its repo is in url_rewrites.
+    - |
+      mkdir -p /root/.amplifier
+      if [ ! -f /root/.amplifier/settings.yaml ]; then
+        cat > /root/.amplifier/settings.yaml << 'EOF'
+      # Base settings stub. settings_overlay deep-merges over this.
+      # Providers are typically configured by the bundle itself; if not,
+      # rely on auto_init_from_env() to pick up ANTHROPIC_API_KEY etc.
+      EOF
+      fi
+
+    # 4. (Optional) Deep-merge settings overlay if one was provided
+{{ SETTINGS_OVERLAY_SETUP_CMD }}
+
+    # 5. Add the bundle under test (NO --app: standalone bundle, project-local)
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      mkdir -p /workspace
+      cd /workspace
+      amplifier bundle add git+https://github.com/microsoft/${BUNDLE_REPO}@main --name ${BUNDLE_NAME}
+      amplifier bundle use ${BUNDLE_NAME}
+
+    # 6. Sanity checks
+    - export PATH="/root/.local/bin:$PATH" && amplifier --version
+    - export PATH="/root/.local/bin:$PATH" && cd /workspace && amplifier bundle current
+
+# ---- update: optional, not used per-run; left here for manual debug -------
+update:
+  cmds:
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      amplifier update --yes --force
+
+# ---- readiness: gate launch on amplifier being functional -----------------
+readiness:
+  - name: amplifier-installed
+    type: command
+    command: 'export PATH=/root/.local/bin:$PATH && amplifier --version'
+  - name: bundle-active
+    type: command
+    command: 'export PATH=/root/.local/bin:$PATH && cd /workspace && amplifier bundle current | grep -q .'

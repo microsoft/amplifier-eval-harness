@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "amplifier-eval-harness"
+version = "0.1.0"
+description = "Test harness for running scenarios through amplifier-app-cli in Digital Twin Universe environments"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Brian Krabach", email = "bkrabach@users.noreply.github.com" }]
+dependencies = [
+    "click>=8.1.0",
+    "pyyaml>=6.0.1",
+    "rich>=13.7.0",
+]
+
+[project.scripts]
+eval-harness = "eval_harness.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["eval_harness"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"profiles" = "eval_harness/_data/profiles"
+"configs" = "eval_harness/_data/configs"
+"scenarios" = "eval_harness/_data/scenarios"
+"settings" = "eval_harness/_data/settings"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]

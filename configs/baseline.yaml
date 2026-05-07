@@ -1,0 +1,30 @@
+# Baseline config — establish ground truth on existing bundles
+#
+# Multiple bundles × explain-repo × 3 runs each.
+# This is what you run BEFORE testing experimental bundles, so you can
+# compare experimental results against a known baseline distribution.
+#
+# Run:
+#   eval-harness run --config configs/baseline.yaml
+
+profile: ../profiles/eval-base.yaml.tmpl
+
+launch_timeout_s: 600
+exec_timeout_s: 900
+
+keep_dtu_on_failure: true
+keep_dtu_on_success: false
+
+settings_overlay: ../settings/anthropic-claude-sonnet.yaml
+
+bundles:
+  - name: foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main
+  # NOTE: confirm amplifier-dev's actual repo before enabling this row.
+  # - name: amplifier-dev
+  #   source: git+https://github.com/microsoft/amplifier-dev@main
+
+scenarios:
+  - explain-repo
+
+runs_per_combo: 3
