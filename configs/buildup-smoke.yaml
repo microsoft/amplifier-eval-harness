@@ -1,0 +1,39 @@
+# buildup-smoke — single task, single run, against the new build-up bundle
+#
+# build-up is the latest experimental bundle in amplifier-foundation
+# (commit ceea007, experiments/build-up/build-up-foundation.md). Radical
+# agent-router architecture: parent has only `todo` + `delegate`; all
+# real work goes through 4 self-sufficient sub-session agents
+# (explorer, planner, coder, tester).
+#
+# Uses ecosystem_overrides to push our LOCAL amplifier-foundation
+# checkout to Gitea (snapshot_push), bypassing GitHub rate limits and
+# guaranteeing the Gitea mirror has the build-up files at the exact
+# HEAD we want to test (ceea007).
+#
+# Run:
+#   amplifier-eval-harness run --config configs/buildup-smoke.yaml
+
+profile: ../profiles/eval-base.yaml.tmpl
+
+parallelism: 1
+launch_timeout_s: 600
+exec_timeout_s: 1500
+
+keep_dtu_on_failure: true
+keep_dtu_on_success: false
+
+settings_overlay: ../settings/default-providers.yaml
+
+ecosystem_overrides:
+  - repo: amplifier-foundation
+    local_path: ../../amplifier-foundation/
+
+bundles:
+  - name: build-up-foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=experiments/build-up/build-up-foundation.md
+
+scenarios:
+  - explain-repo
+
+runs_per_combo: 1

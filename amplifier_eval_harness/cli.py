@@ -34,21 +34,27 @@ def _resolve_repos_to_populate(config: RunConfig) -> list[tuple[str, str, Path |
         seen.add(name)
         out.append((owner, name, local_path))
 
-    # Always-mirror entry points (so the install inside DTU resolves to our mirror)
-    for owner, name in ALWAYS_MIRROR_REPOS:
-        add(owner, name, None)
-
-    # Bundles
-    for b in config.bundles:
-        add(b.repo_owner, b.repo_name, b.local_path)
-
-    # Ecosystem overrides
+    # Ecosystem overrides go FIRST — they are explicit user-configured overrides
+    # and must win over any incidental reference to the same repo via a bundle's
+    # source URL. (Otherwise a bundle that lives in amplifier-foundation will
+    # add the repo with local_path=None, the dedup hits, and the snapshot-push
+    # request from the override is silently dropped.)
     for e in config.ecosystem_overrides:
         if "/" in e.repo:
             owner, name = e.repo.split("/", 1)
         else:
             owner, name = "microsoft", e.repo
         add(owner, name, e.local_path)
+
+    # Always-mirror entry points (so the install inside DTU resolves to our mirror)
+    for owner, name in ALWAYS_MIRROR_REPOS:
+        add(owner, name, None)
+
+    # Bundles last — any bundle whose source repo is already covered by an
+    # ecosystem override gets deduplicated (the override entry already in the
+    # list carries the right local_path).
+    for b in config.bundles:
+        add(b.repo_owner, b.repo_name, b.local_path)
 
     return out
 

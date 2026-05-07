@@ -1,0 +1,41 @@
+# buildup-mid — early-stage cross-scenario probe of the build-up bundle
+#
+# 1 bundle x 3 scenarios x 2 runs = 6 runs, ~15 min wall at parallelism=2.
+# Picks scenarios that exercise different sub-session agents:
+#   - bug-hunt-readonly  (single delegate -> explorer; read-only diagnosis)
+#   - fix-failing-test   (explorer -> coder -> tester delegation chain)
+#   - spec-driven-impl   (planner -> coder -> tester)
+#
+# Uses ecosystem_overrides to push our LOCAL amplifier-foundation checkout
+# (commit ceea007) to Gitea, so the bundle URL resolves to the build-up
+# bundle at exactly the HEAD we want. Now that the dedup bug is fixed,
+# this should snapshot-push cleanly without manual intervention.
+#
+# Run:
+#   amplifier-eval-harness run --config configs/buildup-mid.yaml
+
+profile: ../profiles/eval-base.yaml.tmpl
+
+parallelism: 2
+launch_timeout_s: 600
+exec_timeout_s: 1500
+
+keep_dtu_on_failure: true
+keep_dtu_on_success: false
+
+settings_overlay: ../settings/default-providers.yaml
+
+ecosystem_overrides:
+  - repo: amplifier-foundation
+    local_path: ../../amplifier-foundation/
+
+bundles:
+  - name: build-up-foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=experiments/build-up/build-up-foundation.md
+
+scenarios:
+  - bug-hunt-readonly
+  - fix-failing-test
+  - spec-driven-impl
+
+runs_per_combo: 2
