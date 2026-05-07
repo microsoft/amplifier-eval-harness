@@ -77,6 +77,19 @@ def write_run_artifacts(run_dir: Path, spec: RunSpec, result: RunResult) -> None
     # wall_clock_s
     (run_dir / "wall_clock_s").write_text(f"{result.wall_clock_seconds:.3f}\n")
 
+    # verify outputs (post-agent pytest)
+    if result.verify_exit_code is not None or result.verify_summary:
+        verify_payload = (
+            f"exit_code: {result.verify_exit_code}\n"
+            f"elapsed_seconds: {result.verify_seconds:.3f}\n"
+            f"---\n"
+            f"{result.verify_summary}\n"
+        )
+        (run_dir / "verify.log").write_text(verify_payload)
+    (run_dir / "verify_exit_code").write_text(
+        f"{result.verify_exit_code}\n" if result.verify_exit_code is not None else "skipped\n"
+    )
+
     # dtu-info.json
     dtu_info = {
         "instance_id": result.dtu_instance_id,
@@ -137,6 +150,7 @@ def write_manifest(
         "duration_seconds": (ended_at - started_at).total_seconds(),
         "total_runs": len(results),
         "successes": sum(1 for r in results if r.status == "success"),
+        "task_failures": sum(1 for r in results if r.status == "task_failed"),
         "amplifier_errors": sum(1 for r in results if r.status == "amplifier_error"),
         "harness_errors": sum(1 for r in results if r.status == "harness_error"),
     }
@@ -156,6 +170,7 @@ def write_summary_csv(output_dir: Path, specs_results: list[tuple[RunSpec, RunRe
                 "run_index",
                 "status",
                 "exit_code",
+                "verify_exit_code",
                 "wall_clock_s",
                 "amplifier_duration_ms",
                 "tool_calls",
@@ -175,6 +190,7 @@ def write_summary_csv(output_dir: Path, specs_results: list[tuple[RunSpec, RunRe
                     spec.run_index,
                     result.status,
                     result.exit_code if result.exit_code is not None else "",
+                    "skipped" if result.verify_exit_code is None else result.verify_exit_code,
                     f"{result.wall_clock_seconds:.3f}",
                     md.get("duration_ms", ""),
                     md.get("total_tool_calls", ""),
@@ -201,16 +217,19 @@ def write_summary_md(output_dir: Path, specs_results: list[tuple[RunSpec, RunRes
 
     lines.append("## Per-run results")
     lines.append("")
-    lines.append("| Bundle | Scenario | Run | Status | Exit | Wall (s) | Amp dur (ms) | Tools | Agents | Notes |")
-    lines.append("|---|---|---|---|---|---|---|---|---|---|")
+    lines.append(
+        "| Bundle | Scenario | Run | Status | Exit | Verify | Wall (s) | Amp dur (ms) | Tools | Agents | Notes |"
+    )
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for spec, result in specs_results:
         jt = result.json_trace or {}
         md = jt.get("metadata") or {}
         notes = (result.error or jt.get("error") or "").replace("\n", " ").replace("|", "\\|")[:80]
+        verify_cell = "—" if result.verify_exit_code is None else str(result.verify_exit_code)
         lines.append(
             f"| {spec.bundle.name} | {spec.scenario.id} | {spec.run_index} | "
             f"{result.status} | {result.exit_code if result.exit_code is not None else '—'} | "
-            f"{result.wall_clock_seconds:.1f} | {md.get('duration_ms', '—')} | "
+            f"{verify_cell} | {result.wall_clock_seconds:.1f} | {md.get('duration_ms', '—')} | "
             f"{md.get('total_tool_calls', '—')} | {md.get('total_agents_invoked', '—')} | {notes} |"
         )
 

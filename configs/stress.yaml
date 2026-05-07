@@ -1,0 +1,61 @@
+# stress — designed to find the breaking point
+#
+# 4 bundles x 3 scenarios x 3 runs = 36 runs. Roughly 75-100 min wall.
+#
+# These three scenarios are calibrated to differentiate bundle quality, not
+# just timing. Each is a "completed but wrong is plausible" trap — the
+# new post-agent verify step (pytest in /workspace after the agent exits)
+# catches "amplifier exited 0 with a confident-sounding response, but the
+# task wasn't actually solved" as status=task_failed.
+#
+# Scenarios:
+#   - csv-parser-strict   RFC 4180 with whitespace/BOM/CRLF extensions, ~30
+#                         tests covering edge cases agents commonly miss
+#                         (escaped quotes, embedded newlines, quoted
+#                         whitespace, garbage after closing quote, etc.)
+#   - optimize-with-trap  speed up dedupe_preserve_order >=5x. The naive
+#                         `list(set(items))` answer is the trap — order tests
+#                         catch it. Correct answers exist (`dict.fromkeys`,
+#                         seen-set + ordered list).
+#   - multi-bug-fix       colors.py has 4 distinct bugs across 4 functions
+#                         (rgb_to_hex prefix, hex_to_rgb 3-char shortcut,
+#                         lighten/darken clamping). Missing any one produces
+#                         test failures. Discrimination + completeness test.
+#
+# Bundles: same 4 as configs/advanced.yaml so distributions stack
+# directly:
+#   - foundation              standard
+#   - amplifier-dev           standard, dev tooling
+#   - exp-lean-foundation     84% token reduction
+#   - exp-lean-amplifier-dev  71% token reduction
+#
+# Run:
+#   amplifier-eval-harness run --config configs/stress.yaml
+
+profile: ../profiles/eval-base.yaml.tmpl
+
+parallelism: 2
+launch_timeout_s: 600
+exec_timeout_s: 1500
+
+keep_dtu_on_failure: true
+keep_dtu_on_success: false
+
+settings_overlay: ../settings/default-providers.yaml
+
+bundles:
+  - name: foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main
+  - name: amplifier-dev
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=bundles/amplifier-dev.yaml
+  - name: exp-lean-foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=experiments/exp-lean/exp-lean-foundation.md
+  - name: exp-lean-amplifier-dev
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=experiments/exp-lean/exp-lean-amplifier-dev.md
+
+scenarios:
+  - csv-parser-strict
+  - optimize-with-trap
+  - multi-bug-fix
+
+runs_per_combo: 3

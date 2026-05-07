@@ -1,0 +1,32 @@
+# stress-smoke — verify the 3 stress scenarios + the new harness verify step
+#
+# 1 bundle x 3 scenarios x 1 run = 3 runs (~10-15 min wall). Each scenario
+# in this set is intentionally calibrated to be at or near the breaking
+# point — the multi-bug-fix one in particular is designed so a model that
+# misses any of the 4 distinct bugs will produce verify_exit_code=1
+# (task_failed status) instead of the usual success.
+#
+# Run:
+#   amplifier-eval-harness run --config configs/stress-smoke.yaml
+
+profile: ../profiles/eval-base.yaml.tmpl
+
+parallelism: 2
+launch_timeout_s: 600
+exec_timeout_s: 1500
+
+keep_dtu_on_failure: true
+keep_dtu_on_success: false
+
+settings_overlay: ../settings/default-providers.yaml
+
+bundles:
+  - name: foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main
+
+scenarios:
+  - csv-parser-strict
+  - optimize-with-trap
+  - multi-bug-fix
+
+runs_per_combo: 1

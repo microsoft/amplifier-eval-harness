@@ -38,11 +38,29 @@ class RunResult:
     error: str | None = None  # populated on harness-side failures (launch/exec/teardown)
     started_at: str = ""
     ended_at: str = ""
+    # Post-agent verification: pytest run inside /workspace AFTER the agent
+    # finishes. This is what catches "amplifier exited 0 but the task
+    # actually failed" — agent claimed success in its response but tests
+    # don't pass / refactor regressed something / spec impl is wrong.
+    #   verify_exit_code = None   → no test files in /workspace; verify skipped
+    #   verify_exit_code = 0      → pytest passed
+    #   verify_exit_code != 0     → pytest failed (1=fails, 2=collection/import error, etc.)
+    verify_exit_code: int | None = None
+    verify_summary: str = ""
+    verify_seconds: float = 0.0
     extras: dict[str, Any] = field(default_factory=dict)
 
     @property
     def status(self) -> str:
-        """High-level outcome: 'success' | 'amplifier_error' | 'harness_error' | 'unknown'."""
+        """High-level outcome.
+
+        Returns one of:
+          'success'         — amplifier exited 0 AND verify passed (or was skipped)
+          'task_failed'     — amplifier exited 0 BUT verify reported failing tests
+          'amplifier_error' — amplifier exited non-zero, or its json-trace status is 'error'
+          'harness_error'   — DTU launch/exec/teardown blew up
+          'unknown'         — exit code wasn't captured at all
+        """
         if self.error:
             return "harness_error"
         if self.exit_code is None:
@@ -51,6 +69,10 @@ class RunResult:
             return "amplifier_error"
         if self.json_trace and self.json_trace.get("status") == "error":
             return "amplifier_error"
+        # verify_exit_code == 0 is pass; None means skipped (no tests); anything
+        # else means tests failed or pytest itself errored.
+        if self.verify_exit_code is not None and self.verify_exit_code != 0:
+            return "task_failed"
         return "success"
 
 
@@ -199,6 +221,57 @@ def _file_pull_session(instance_id: str, dest_dir: Path) -> None:
         log(f"  warning: file-pull failed (rc={result.returncode}): {result.stderr.strip()}")
 
 
+def _verify_workspace(instance_id: str) -> tuple[int | None, str, float]:
+    """Run pytest inside /workspace AFTER the agent completes.
+
+    The harness records this as a separate signal from amplifier's own exit
+    code. Catches "agent claimed pass / amplifier exited 0 but the task was
+    not actually solved" — refactor regressions, spec-impl gaps, fix that
+    relaxed a test, etc.
+
+    Returns:
+        (exit_code, summary, elapsed_seconds)
+
+        exit_code semantics:
+          None  - no test_*.py in /workspace; verify is skipped (treat as neutral)
+          0     - pytest passed
+          5     - pytest collected no tests; treat as skipped (returned as None)
+          other - pytest failed (1) or errored (2/3/4)
+    """
+    t0 = time.time()
+
+    # Probe: do any test files exist? (workspace+nested)
+    probe_cmd = "find /workspace -maxdepth 4 -type f -name 'test_*.py' -o -name '*_test.py' 2>/dev/null | head -1"
+    probe = _run_dtu(["exec", instance_id, "--", "bash", "-lc", probe_cmd], timeout=30)
+    if probe.returncode != 0:
+        return None, f"verify: probe failed (rc={probe.returncode}): {probe.stderr[:200]}", time.time() - t0
+    try:
+        outer = json.loads(probe.stdout)
+    except json.JSONDecodeError:
+        return None, "verify: probe stdout not parseable JSON", time.time() - t0
+    test_path = (outer.get("stdout") or "").strip()
+    if not test_path:
+        return None, "verify: skipped (no test_*.py in /workspace)", time.time() - t0
+
+    # Run pytest. --tb=line keeps the failure output compact.
+    pytest_cmd = "cd /workspace && python3 -m pytest --tb=line -q 2>&1 | tail -40"
+    args = ["exec", instance_id, "--", "bash", "-lc", pytest_cmd]
+    result = _run_dtu(args, timeout=180)
+    elapsed = time.time() - t0
+    if result.returncode != 0:
+        return -1, f"verify: exec wrapper failed (rc={result.returncode}): {result.stderr[:300]}", elapsed
+    try:
+        outer = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return -1, f"verify: pytest stdout unparseable: {result.stdout[:300]}", elapsed
+    pytest_exit = int(outer.get("exit_code", -1))
+    summary = (outer.get("stdout", "") + outer.get("stderr", ""))[-2000:]
+    if pytest_exit == 5:
+        # No tests collected — treat as skip
+        return None, "verify: skipped (pytest collected 0 tests)\n" + summary, elapsed
+    return pytest_exit, summary, elapsed
+
+
 def _destroy_dtu(instance_id: str) -> float:
     """Destroy the DTU, returning seconds elapsed."""
     t0 = time.time()
@@ -275,6 +348,23 @@ def _run_one_inner(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResu
 
         # 6. Pull session files
         _file_pull_session(instance_id, run_dir)
+
+        # 6a. Post-agent verification — run pytest in /workspace if tests exist.
+        # Distinct from amplifier's exit code: catches the case where amplifier
+        # ran cleanly to completion but the task wasn't actually solved.
+        try:
+            v_code, v_summary, v_elapsed = _verify_workspace(instance_id)
+            result.verify_exit_code = v_code
+            result.verify_summary = v_summary
+            result.verify_seconds = v_elapsed
+            if v_code is None:
+                log("  · verify skipped")
+            elif v_code == 0:
+                log("  ✓ verify passed (pytest 0)")
+            else:
+                log(f"  ✗ verify FAILED (pytest rc={v_code})")
+        except Exception as ve:
+            log(f"  warning: verify step raised: {type(ve).__name__}: {ve}")
 
     except Exception as e:
         result.error = f"{type(e).__name__}: {e}"
