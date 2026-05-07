@@ -1,0 +1,41 @@
+# buildup-smoke-openai — first cross-provider validation run
+#
+# Smallest possible probe to confirm that:
+#   1. The openai provider is reachable from inside the DTU
+#      (OPENAI_API_KEY passes through, base_url resolves, etc.).
+#   2. The routing matrix override (openai instead of balanced) takes
+#      effect — confirmed via usage.json's by_model breakdown.
+#   3. The build-up bundle's agent-router pattern still functions when
+#      the underlying model is OpenAI rather than Anthropic.
+#
+# Same scenario shape as the original buildup-smoke run for direct
+# comparison: 1 bundle x 1 scenario x 1 run. ~3 min wall when DTU
+# image is warm.
+#
+# Run:
+#   amplifier-eval-harness run --config configs/buildup-smoke-openai.yaml
+
+profile: ../profiles/eval-base.yaml.tmpl
+
+parallelism: 1
+launch_timeout_s: 600
+exec_timeout_s: 1500
+
+keep_dtu_on_failure: true
+keep_dtu_on_success: false
+
+# OpenAI-primary overlay — flips priority to 1 and matrix to "openai".
+settings_overlay: ../settings/openai-providers.yaml
+
+ecosystem_overrides:
+  - repo: amplifier-foundation
+    local_path: ../../amplifier-foundation/
+
+bundles:
+  - name: build-up-foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=experiments/build-up/build-up-foundation.md
+
+scenarios:
+  - bug-hunt-readonly
+
+runs_per_combo: 1

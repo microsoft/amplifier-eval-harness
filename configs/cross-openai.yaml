@@ -1,0 +1,51 @@
+# cross-openai — cross-bundle smoke on the OpenAI stack
+#
+# Same matrix shape as configs/cross-anthropic.yaml so distributions
+# stack side-by-side. Only difference: settings_overlay points at the
+# OpenAI-primary provider config (priority swapped, routing.matrix=openai).
+#
+# The two configs were intentionally designed to be diff-able:
+#
+#   $ diff configs/cross-anthropic.yaml configs/cross-openai.yaml
+#   <   settings_overlay: ../settings/default-providers.yaml
+#   >   settings_overlay: ../settings/openai-providers.yaml
+#
+# Run:
+#   amplifier-eval-harness run --config configs/cross-openai.yaml
+
+profile: ../profiles/eval-base.yaml.tmpl
+
+parallelism: 2
+launch_timeout_s: 600
+exec_timeout_s: 1500
+
+keep_dtu_on_failure: true
+keep_dtu_on_success: false
+
+# OpenAI-primary overlay: gpt-5.5 priority 1, routing.matrix=openai
+# (routes openai for general/coding/critique roles, gpt-?.?-pro* for
+# reasoning, gpt-?.?-mini* for fast).
+settings_overlay: ../settings/openai-providers.yaml
+
+ecosystem_overrides:
+  - repo: amplifier-foundation
+    local_path: ../../amplifier-foundation/
+
+bundles:
+  - name: foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main
+  - name: amplifier-dev
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=bundles/amplifier-dev.yaml
+  - name: exp-lean-foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=experiments/exp-lean/exp-lean-foundation.md
+  - name: exp-lean-amplifier-dev
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=experiments/exp-lean/exp-lean-amplifier-dev.md
+  - name: build-up-foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=experiments/build-up/build-up-foundation.md
+
+scenarios:
+  - explain-repo
+  - fix-failing-test
+  - spec-driven-impl
+
+runs_per_combo: 1

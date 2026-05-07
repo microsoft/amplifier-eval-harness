@@ -1,0 +1,69 @@
+# OpenAI-priority provider/model overlay for the eval harness.
+#
+# Sibling of settings/default-providers.yaml. The provider list and config
+# are identical (same env-var passthrough, same modules, same source URLs)
+# so there's no infrastructure difference between Anthropic-primary and
+# OpenAI-primary runs. The only changes are:
+#
+#   1. priority swap: openai = 1, anthropic = 13. The orchestrator's
+#      no-role default falls to the highest-priority installed provider.
+#   2. routing.matrix = openai. Role-based requests resolve via the
+#      curated `openai` matrix from amplifier-bundle-routing-matrix
+#      (general/coding/critique/etc. -> gpt-5.5, fast -> gpt-?.?-mini*,
+#      reasoning -> gpt-?.?-pro*).
+#
+# Use by pointing a config's `settings_overlay:` at this file.
+#
+# Counterpart for honest cross-provider eval comparisons: settings/default-
+# providers.yaml keeps anthropic at priority 1 + routing.matrix=balanced.
+
+config:
+  providers:
+    - id: anthropic
+      module: provider-anthropic
+      source: git+https://github.com/microsoft/amplifier-module-provider-anthropic@main
+      config:
+        api_key: ${ANTHROPIC_API_KEY}
+        base_url: ${ANTHROPIC_BASE_URL}
+        default_model: claude-opus-4-7
+        enable_1m_context: 'true'
+        enable_prompt_caching: 'true'
+        fallback_cooldown_seconds: '300'
+        fallback_haiku_model: claude-haiku-4-5
+        fallback_on_overload: 'true'
+        fallback_retry_count: '2'
+        fallback_sonnet_model: claude-sonnet-4-6
+        persist_fallback_state: 'true'
+        priority: 13
+
+    - module: provider-gemini
+      source: git+https://github.com/microsoft/amplifier-module-provider-gemini@main
+      config:
+        api_key: ${GOOGLE_API_KEY}
+        default_model: gemini-3.1-flash-image-preview
+        priority: 6
+
+    - module: provider-github-copilot
+      source: git+https://github.com/microsoft/amplifier-module-provider-github-copilot@main
+      config:
+        github_token: ${GITHUB_TOKEN}
+        priority: 7
+
+    - module: provider-openai
+      source: git+https://github.com/microsoft/amplifier-module-provider-openai@main
+      config:
+        api_key: ${OPENAI_API_KEY}
+        base_url: ${OPENAI_BASE_URL}
+        default_model: gpt-5.5
+        enable_long_context: 'false'
+        priority: 1
+        reasoning_effort: high
+
+# Routing matrix — switches role-based selection to OpenAI-only.
+# The curated matrix from amplifier-bundle-routing-matrix is loaded at
+# session start by the routing hook. Roles map to:
+#   general / coding / critique -> gpt-5.5
+#   fast                         -> gpt-?.?-mini*
+#   reasoning / research         -> gpt-?.?-pro* (reasoning_effort: high)
+routing:
+  matrix: openai

@@ -248,9 +248,9 @@ def write_summary_md(output_dir: Path, specs_results: list[tuple[RunSpec, RunRes
     lines.append("")
     lines.append(
         "| Bundle | Scenario | Run | Status | Verify | Wall (s) | LLM time (s) | "
-        "Reqs | Sess | Tok in | Tok out | Tok billable | Max call | LLM avg (s) |"
+        "Reqs | Sess | Tok in | Tok out | Tok billable | Cache R | Cache W | Max call | LLM avg (s) |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for spec, result in specs_results:
         u = result.usage
         verify_cell = "—" if result.verify_exit_code is None else str(result.verify_exit_code)
@@ -259,7 +259,8 @@ def write_summary_md(output_dir: Path, specs_results: list[tuple[RunSpec, RunRes
             f"{result.status} | {verify_cell} | {result.wall_clock_seconds:.1f} | "
             f"{u.llm_time_ms_total / 1000:.1f} | {u.request_count} | {u.session_count} | "
             f"{u.input_tokens_total:,} | {u.output_tokens_total:,} | "
-            f"{u.billable_tokens_total:,} | {u.max_call_combined_tokens:,} | "
+            f"{u.billable_tokens_total:,} | {u.cache_read_tokens_total:,} | "
+            f"{u.cache_write_tokens_total:,} | {u.max_call_combined_tokens:,} | "
             f"{u.llm_time_ms_avg / 1000:.2f} |"
         )
 
