@@ -1,19 +1,15 @@
 # eval-harness DTU profile template
 #
-# Rendered per-run by eval_harness.profile.render_profile():
-#   - {{ URL_REWRITES_RULES }}        -- spliced in: one rule per repo we route through Gitea
-#   - {{ PYPI_OVERRIDES }}            -- spliced in only when amplifier-core is locally overridden
-#   - {{ SETTINGS_OVERLAY_FILES }}    -- spliced in only when settings_overlay is configured
-#   - {{ SETTINGS_OVERLAY_SETUP_CMD }} -- spliced in only when settings_overlay is configured
+# Rendered per-run by eval_harness.profile.render_profile().
+# Splice points (literal placeholders below, marked with double braces):
+#   URL_REWRITES_RULES        - one rule per repo we route through Gitea
+#   PYPI_OVERRIDES            - inserted only when amplifier-core is locally overridden
+#   SETTINGS_OVERLAY_FILES    - inserted only when settings_overlay is configured
+#   SETTINGS_OVERLAY_SETUP_CMD - inserted only when settings_overlay is configured
 #
-# Resolved at LAUNCH time via --var:
-#   GITEA_URL              http://localhost:<port> (auto-rewritten to host gateway IP)
-#   GITEA_TOKEN            API token for Gitea
-#   BUNDLE_INSTALL_URL     full git+https URL (incl. #subdirectory= if any) for `amplifier bundle add`
-#   BUNDLE_REPO            repo name of the bundle (used in name + url_rewrites)
-#   BUNDLE_NAME            short alias passed via --name to `amplifier bundle add`
-#   SCENARIO_ID            scenario short id
-#   AMPLIFIER_INSTALL_REF  branch/SHA of microsoft/amplifier to install (default: main)
+# Resolved at LAUNCH time via amplifier-digital-twin --var KEY=VALUE:
+#   GITEA_URL, GITEA_TOKEN, BUNDLE_INSTALL_URL, BUNDLE_REPO, BUNDLE_NAME,
+#   SCENARIO_ID, AMPLIFIER_INSTALL_REF
 
 name: eval-${BUNDLE_NAME}-${SCENARIO_ID}
 description: >
@@ -35,7 +31,7 @@ url_rewrites:
 {{ PYPI_OVERRIDES }}
 
 # ---- passthrough: forward provider API keys + base URLs from host ---------
-# Listed env vars that are unset on the host are simply not forwarded — no error.
+# Listed env vars that are unset on the host are simply not forwarded.
 passthrough:
   allow_external: true
   services:
@@ -64,7 +60,7 @@ provision:
     - apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates
     - curl -LsSf https://astral.sh/uv/install.sh | sh
 
-    # 2. Install amplifier from upstream (intercepted by mitmproxy + redirected to Gitea)
+    # 2. Install amplifier from upstream (intercepted by mitmproxy and redirected to Gitea)
     - |
       export PATH="/root/.local/bin:$PATH"
       uv tool install git+https://github.com/microsoft/amplifier@${AMPLIFIER_INSTALL_REF}
@@ -74,15 +70,15 @@ provision:
       mkdir -p /root/.amplifier
       if [ ! -f /root/.amplifier/settings.yaml ]; then
         cat > /root/.amplifier/settings.yaml << 'EOF'
-      # Placeholder; deep-merged with settings_overlay (if any) in the next step.
+      # Placeholder - deep-merged with settings_overlay (if any) in the next step.
       EOF
       fi
 
-    # 4. (Optional) Deep-merge settings overlay if one was provided
+    # 4. Optional: deep-merge settings overlay if one was provided
 {{ SETTINGS_OVERLAY_SETUP_CMD }}
 
-    # 5. Add the bundle under test (NO --app: standalone bundle, project-local).
-    #    BUNDLE_INSTALL_URL preserves any #subdirectory= fragment from the source.
+    # 5. Add the bundle under test (no --app: standalone bundle, project-local).
+    #    BUNDLE_INSTALL_URL preserves any subdirectory fragment from the source.
     - |
       export PATH="/root/.local/bin:$PATH"
       mkdir -p /workspace

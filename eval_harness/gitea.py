@@ -41,13 +41,22 @@ def _run(
     cmd: list[str], *, capture: bool = True, check: bool = True, cwd: Path | None = None
 ) -> subprocess.CompletedProcess:
     log(f"+ {' '.join(shlex.quote(c) for c in cmd)}")
-    return subprocess.run(
+    result = subprocess.run(
         cmd,
         capture_output=capture,
         text=True,
-        check=check,
+        check=False,
         cwd=str(cwd) if cwd else None,
     )
+    if check and result.returncode != 0:
+        # Surface captured output BEFORE raising so the user sees what went wrong.
+        log(f"  command failed (rc={result.returncode})")
+        if result.stdout and result.stdout.strip():
+            log(f"  stdout: {result.stdout.strip()[:1000]}")
+        if result.stderr and result.stderr.strip():
+            log(f"  stderr: {result.stderr.strip()[:1000]}")
+        result.check_returncode()  # raises CalledProcessError
+    return result
 
 
 def _run_shell(script: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
@@ -113,28 +122,54 @@ def ensure_gitea(preferred_port: int = 10110) -> GiteaSession:
 
 
 def _gitea_repo_exists(session: GiteaSession, repo_name: str) -> bool:
-    """Return True if admin/<repo_name> exists in Gitea."""
+    """Return True if admin/<repo_name> exists in Gitea (HTTP 200 to its API endpoint)."""
     cmd = [
         "curl",
-        "-sf",
+        "-s",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}",
         "-H",
         f"Authorization: token {session.token}",
         f"{session.url}/api/v1/repos/admin/{repo_name}",
     ]
-    return subprocess.run(cmd, capture_output=True).returncode == 0
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    code = (result.stdout or "").strip()
+    exists = code == "200"
+    log(f"  · existence check {repo_name}: HTTP {code or '?'} → {'exists' if exists else 'not found'}")
+    return exists
 
 
 def mirror_from_github(session: GiteaSession, github_url: str, *, github_token: str | None = None) -> None:
-    """Mirror a GitHub repo to Gitea (one-shot snapshot, mirror=False). Idempotent."""
+    """Mirror a GitHub repo to Gitea. Idempotent against pre-existing repos.
+
+    Persistent Docker volumes mean a "fresh" Gitea instance can have repos from
+    previous runs. The amplifier-gitea CLI surfaces this as a 409 from Gitea's
+    migrate API. We treat any failure where the repo ends up existing as a no-op.
+    """
     repo_name = github_url.rstrip("/").split("/")[-1].removesuffix(".git")
+
     if _gitea_repo_exists(session, repo_name):
         log(f"  → {repo_name} already in Gitea, skipping mirror.")
         return
+
     cmd = ["amplifier-gitea", "mirror-from-github", session.instance_id, "--github-repo", github_url]
     if github_token:
         cmd.extend(["--github-token", github_token])
-    _run(cmd)
-    log(f"  → mirrored {github_url} → admin/{repo_name}")
+
+    try:
+        _run(cmd)
+        log(f"  → mirrored {github_url} → admin/{repo_name}")
+    except subprocess.CalledProcessError as e:
+        if _gitea_repo_exists(session, repo_name):
+            log(f"  → {repo_name} present after mirror call (likely 409 already-exists); proceeding.")
+            return
+        raise RuntimeError(
+            f"mirror-from-github failed for {github_url} (rc={e.returncode}). "
+            f"Gitea does not contain admin/{repo_name} after the call. "
+            f"stdout: {(e.stdout or '').strip()[:500]} | stderr: {(e.stderr or '').strip()[:500]}"
+        ) from e
 
 
 def snapshot_push(session: GiteaSession, local_path: Path, repo_name: str) -> None:
