@@ -90,6 +90,9 @@ def write_run_artifacts(run_dir: Path, spec: RunSpec, result: RunResult) -> None
         f"{result.verify_exit_code}\n" if result.verify_exit_code is not None else "skipped\n"
     )
 
+    # LLM usage — full aggregate JSON (per-model breakdown included)
+    (run_dir / "usage.json").write_text(json.dumps(result.usage.to_dict(), indent=2, default=_json_default))
+
     # dtu-info.json
     dtu_info = {
         "instance_id": result.dtu_instance_id,
@@ -176,12 +179,26 @@ def write_summary_csv(output_dir: Path, specs_results: list[tuple[RunSpec, RunRe
                 "tool_calls",
                 "agents_invoked",
                 "model",
+                # LLM usage aggregated across parent + every sub-session
+                "llm_requests",
+                "llm_sessions",
+                "tokens_in_total",
+                "tokens_out_total",
+                "tokens_billable_total",
+                "tokens_cache_read_total",
+                "tokens_cache_write_total",
+                "tokens_max_single_call",
+                "tokens_avg_per_call",
+                "llm_time_ms_total",
+                "llm_time_ms_max",
+                "llm_time_ms_avg",
                 "error",
             ]
         )
         for spec, result in specs_results:
             jt = result.json_trace or {}
             md = jt.get("metadata") or {}
+            u = result.usage
             w.writerow(
                 [
                     result.run_id,
@@ -196,6 +213,18 @@ def write_summary_csv(output_dir: Path, specs_results: list[tuple[RunSpec, RunRe
                     md.get("total_tool_calls", ""),
                     md.get("total_agents_invoked", ""),
                     jt.get("model", ""),
+                    u.request_count,
+                    u.session_count,
+                    u.input_tokens_total,
+                    u.output_tokens_total,
+                    u.billable_tokens_total,
+                    u.cache_read_tokens_total,
+                    u.cache_write_tokens_total,
+                    u.max_call_combined_tokens,
+                    f"{u.billable_tokens_avg:.1f}",
+                    u.llm_time_ms_total,
+                    u.llm_time_ms_max,
+                    f"{u.llm_time_ms_avg:.1f}",
                     (result.error or jt.get("error") or "").replace("\n", " | ")[:200],
                 ]
             )
@@ -218,20 +247,59 @@ def write_summary_md(output_dir: Path, specs_results: list[tuple[RunSpec, RunRes
     lines.append("## Per-run results")
     lines.append("")
     lines.append(
-        "| Bundle | Scenario | Run | Status | Exit | Verify | Wall (s) | Amp dur (ms) | Tools | Agents | Notes |"
+        "| Bundle | Scenario | Run | Status | Verify | Wall (s) | LLM time (s) | "
+        "Reqs | Sess | Tok in | Tok out | Tok billable | Max call | LLM avg (s) |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for spec, result in specs_results:
-        jt = result.json_trace or {}
-        md = jt.get("metadata") or {}
-        notes = (result.error or jt.get("error") or "").replace("\n", " ").replace("|", "\\|")[:80]
+        u = result.usage
         verify_cell = "—" if result.verify_exit_code is None else str(result.verify_exit_code)
         lines.append(
             f"| {spec.bundle.name} | {spec.scenario.id} | {spec.run_index} | "
-            f"{result.status} | {result.exit_code if result.exit_code is not None else '—'} | "
-            f"{verify_cell} | {result.wall_clock_seconds:.1f} | {md.get('duration_ms', '—')} | "
-            f"{md.get('total_tool_calls', '—')} | {md.get('total_agents_invoked', '—')} | {notes} |"
+            f"{result.status} | {verify_cell} | {result.wall_clock_seconds:.1f} | "
+            f"{u.llm_time_ms_total / 1000:.1f} | {u.request_count} | {u.session_count} | "
+            f"{u.input_tokens_total:,} | {u.output_tokens_total:,} | "
+            f"{u.billable_tokens_total:,} | {u.max_call_combined_tokens:,} | "
+            f"{u.llm_time_ms_avg / 1000:.2f} |"
         )
+
+    # Per-model breakdown — only emit if any model showed up.
+    all_models: dict[str, dict[str, int]] = {}
+    for _, r in specs_results:
+        for k, v in r.usage.by_model.items():
+            agg = all_models.setdefault(
+                k,
+                {
+                    "requests": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "llm_time_ms": 0,
+                    "runs_seen": 0,
+                },
+            )
+            agg["requests"] += v.requests
+            agg["input_tokens"] += v.input_tokens
+            agg["output_tokens"] += v.output_tokens
+            agg["cache_read_tokens"] += v.cache_read_tokens
+            agg["cache_write_tokens"] += v.cache_write_tokens
+            agg["llm_time_ms"] += v.llm_time_ms
+            agg["runs_seen"] += 1
+    if all_models:
+        lines.append("")
+        lines.append("## Per-model totals (across all runs)")
+        lines.append("")
+        lines.append("| Provider/Model | Runs | Reqs | Tok in | Tok out | Tok cache_r | Tok cache_w | LLM time (s) |")
+        lines.append("|---|---|---|---|---|---|---|---|")
+        for k in sorted(all_models):
+            a = all_models[k]
+            lines.append(
+                f"| {k} | {a['runs_seen']} | {a['requests']} | "
+                f"{a['input_tokens']:,} | {a['output_tokens']:,} | "
+                f"{a['cache_read_tokens']:,} | {a['cache_write_tokens']:,} | "
+                f"{a['llm_time_ms'] / 1000:.1f} |"
+            )
 
     (output_dir / "summary.md").write_text("\n".join(lines) + "\n")
 

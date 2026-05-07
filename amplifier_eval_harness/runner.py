@@ -17,6 +17,7 @@ from ._log import clear_prefix, log, set_prefix
 from .config import RunSpec
 from .gitea import GiteaSession
 from .profile import RenderedProfile, render_profile, write_profile
+from .usage import UsageMetrics, collect_usage
 
 
 @dataclass
@@ -48,6 +49,9 @@ class RunResult:
     verify_exit_code: int | None = None
     verify_summary: str = ""
     verify_seconds: float = 0.0
+    # LLM usage aggregated from events.jsonl across parent + all sub-sessions.
+    # Populated post-pull; defaults to a zero-value record if no events were found.
+    usage: UsageMetrics = field(default_factory=UsageMetrics)
     extras: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -348,6 +352,27 @@ def _run_one_inner(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResu
 
         # 6. Pull session files
         _file_pull_session(instance_id, run_dir)
+
+        # 6.1. Aggregate LLM usage from the pulled events.jsonl files.
+        # Walks the parent session + every sub-session (delegate, recipes,
+        # fork-skills) since each writes its own events.jsonl into the
+        # standard ~/.amplifier/projects/<slug>/sessions/<id>/ layout that
+        # gets pulled wholesale by step 6.
+        try:
+            result.usage = collect_usage(run_dir / "session")
+            u = result.usage
+            if u.request_count:
+                log(
+                    f"  ↗ usage: {u.request_count} req across {u.session_count} session(s); "
+                    f"{u.billable_tokens_total:,} billable tok ({u.input_tokens_total:,} in / "
+                    f"{u.output_tokens_total:,} out); max single call {u.max_call_combined_tokens:,}; "
+                    f"llm time {u.llm_time_ms_total / 1000:.1f}s "
+                    f"(avg {u.llm_time_ms_avg / 1000:.2f}s, max {u.llm_time_ms_max / 1000:.1f}s)"
+                )
+            else:
+                log("  ↗ usage: 0 LLM requests recorded (no events.jsonl or no llm:response events)")
+        except Exception as ue:
+            log(f"  warning: usage collection failed: {type(ue).__name__}: {ue}")
 
         # 6a. Post-agent verification — run pytest in /workspace if tests exist.
         # Distinct from amplifier's exit code: catches the case where amplifier

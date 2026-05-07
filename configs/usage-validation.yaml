@@ -1,0 +1,13 @@
+profile: ../profiles/eval-base.yaml.tmpl
+parallelism: 1
+launch_timeout_s: 600
+exec_timeout_s: 1500
+keep_dtu_on_failure: true
+keep_dtu_on_success: false
+settings_overlay: ../settings/default-providers.yaml
+bundles:
+  - name: foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main
+scenarios:
+  - bug-hunt-readonly
+runs_per_combo: 1
