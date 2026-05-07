@@ -1,0 +1,62 @@
+# advanced — push the suite further on harder tasks across all 4 bundles
+#
+# 4 bundles x 4 scenarios x 3 runs = 48 runs. Roughly 90-120 min wall at
+# parallelism=2 (advanced tasks run longer than the baseline scenarios —
+# multi-file edits, spec-from-scratch, debug-with-no-failing-test, and
+# performance investigation all push past 200s on average).
+#
+# Same matrix shape as configs/baseline.yaml + configs/exp-lean.yaml so
+# results plug directly into the existing distributions for cross-config
+# comparison. The scenario set is DISJOINT from baseline.yaml so this run
+# adds new data rather than re-running settled cells.
+#
+# Bundles in this run:
+#   - foundation                 (standard, full)
+#   - amplifier-dev              (standard, full + dev tooling)
+#   - exp-lean-foundation        (84% token reduction)
+#   - exp-lean-amplifier-dev     (71% token reduction)
+#
+# Scenarios (all NEW vs baseline.yaml — see scenarios/<id>/prompt.md for
+# the exact prompts and workspace fixtures):
+#   - multi-file-feature   coordinated edit across todoctl/{models,storage,
+#                          render,__main__}.py + test additions, --status
+#                          filter feature
+#   - spec-driven-impl     implement Roman numerals from SPEC.md,
+#                          round-trip property must hold
+#   - debug-no-test        reproduce LRU off-by-one bug from a written
+#                          BUG_REPORT.md with no failing test, write a
+#                          reproducer, fix the bug
+#   - perf-investigation   profile + optimize an O(n^2) word-counter,
+#                          must show >=5x speedup, tests must still pass
+#
+# Run:
+#   amplifier-eval-harness run --config configs/advanced.yaml
+
+profile: ../profiles/eval-base.yaml.tmpl
+
+parallelism: 2
+launch_timeout_s: 600
+exec_timeout_s: 1500   # generous — advanced tasks run longer than baseline ones
+
+keep_dtu_on_failure: true
+keep_dtu_on_success: false
+
+settings_overlay: ../settings/default-providers.yaml
+
+bundles:
+  - name: foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main
+  - name: amplifier-dev
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=bundles/amplifier-dev.yaml
+  - name: exp-lean-foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=experiments/exp-lean/exp-lean-foundation.md
+  - name: exp-lean-amplifier-dev
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=experiments/exp-lean/exp-lean-amplifier-dev.md
+
+scenarios:
+  - multi-file-feature
+  - spec-driven-impl
+  - debug-no-test
+  - perf-investigation
+
+runs_per_combo: 3

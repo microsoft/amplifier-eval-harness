@@ -1,0 +1,45 @@
+# exp-lean — comparison run for the experimental lean bundles
+#
+# Same matrix shape as configs/baseline.yaml (6 scenarios × 3 runs) so the
+# results plug directly into the baseline distribution side-by-side. The
+# only thing that varies between this run and baseline is the bundle:
+#
+#   baseline.yaml             this file
+#   ─────────────             ─────────
+#   foundation                exp-lean-foundation       (84% token cut)
+#   amplifier-dev             exp-lean-amplifier-dev    (71% token cut)
+#
+# Both lean bundles live as single-file YAML inside amplifier-foundation
+# under experiments/exp-lean/, referenced via #subdirectory=. The repo
+# itself was already mirrored to Gitea by the standard baseline run, so
+# repo population should be a no-op the second time around.
+#
+# Run:
+#   amplifier-eval-harness run --config configs/exp-lean.yaml
+
+profile: ../profiles/eval-base.yaml.tmpl
+
+parallelism: 2
+launch_timeout_s: 600
+exec_timeout_s: 900
+
+keep_dtu_on_failure: true
+keep_dtu_on_success: false
+
+settings_overlay: ../settings/default-providers.yaml
+
+bundles:
+  - name: exp-lean-foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=experiments/exp-lean/exp-lean-foundation.md
+  - name: exp-lean-amplifier-dev
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=experiments/exp-lean/exp-lean-amplifier-dev.md
+
+scenarios:
+  - explain-repo
+  - fix-failing-test
+  - refactor-extract
+  - plan-feature
+  - write-tests
+  - bug-hunt-readonly
+
+runs_per_combo: 3

@@ -1,0 +1,31 @@
+# advanced-smoke — verify the 4 advanced scenarios work end-to-end
+#
+# 1 bundle x 4 scenarios x 1 run = 4 runs (~15 min wall). Run this
+# right after editing an advanced scenario fixture. Use advanced.yaml
+# for the real comparison run across all 4 bundles.
+#
+# Run:
+#   amplifier-eval-harness run --config configs/advanced-smoke.yaml
+
+profile: ../profiles/eval-base.yaml.tmpl
+
+parallelism: 2
+launch_timeout_s: 600
+exec_timeout_s: 1500   # generous — advanced tasks run longer than baseline ones
+
+keep_dtu_on_failure: true
+keep_dtu_on_success: false
+
+settings_overlay: ../settings/default-providers.yaml
+
+bundles:
+  - name: foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main
+
+scenarios:
+  - multi-file-feature
+  - spec-driven-impl
+  - debug-no-test
+  - perf-investigation
+
+runs_per_combo: 1
