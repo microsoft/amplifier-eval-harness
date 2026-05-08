@@ -331,48 +331,57 @@ def _run_one_inner(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResu
         if spec.scenario.workspace_path is not None:
             _push_workspace_fixture(instance_id, spec.scenario.workspace_path)
 
-        # 5. Exec amplifier
+        # 5. Exec amplifier — wrapped in try/finally so steps 6 and 6.1 always
+        # run even when exec raises (e.g. subprocess.TimeoutExpired).  The
+        # finally block is best-effort: pull/usage failures are logged but do
+        # not mask the original exec exception.
         prompt = spec.scenario.prompt_path.read_text()
-        exit_code, stdout, stderr, exec_elapsed = _exec_amplifier(
-            instance_id,
-            bundle_name=spec.bundle.name,
-            prompt=prompt,
-            timeout_s=spec.config.exec_timeout_s,
-        )
-        result.exit_code = exit_code
-        result.raw_stdout = stdout
-        result.raw_stderr = stderr
-        result.exec_seconds = exec_elapsed
-
-        # Try to parse json-trace. Strip leading non-JSON noise (banners,
-        # provisioning logs) before falling back. NOTE: use the FIRST `{`
-        # not the last — the trace is a single top-level object, and the
-        # last `{` is just the metadata object nested inside it.
-        result.json_trace = _extract_json_trace(stdout)
-
-        # 6. Pull session files
-        _file_pull_session(instance_id, run_dir)
-
-        # 6.1. Aggregate LLM usage from the pulled events.jsonl files.
-        # Walks the parent session + every sub-session (delegate, recipes,
-        # fork-skills) since each writes its own events.jsonl into the
-        # standard ~/.amplifier/projects/<slug>/sessions/<id>/ layout that
-        # gets pulled wholesale by step 6.
         try:
-            result.usage = collect_usage(run_dir / "session")
-            u = result.usage
-            if u.request_count:
-                log(
-                    f"  ↗ usage: {u.request_count} req across {u.session_count} session(s); "
-                    f"{u.billable_tokens_total:,} billable tok ({u.input_tokens_total:,} in / "
-                    f"{u.output_tokens_total:,} out); max single call {u.max_call_combined_tokens:,}; "
-                    f"llm time {u.llm_time_ms_total / 1000:.1f}s "
-                    f"(avg {u.llm_time_ms_avg / 1000:.2f}s, max {u.llm_time_ms_max / 1000:.1f}s)"
-                )
-            else:
-                log("  ↗ usage: 0 LLM requests recorded (no events.jsonl or no llm:response events)")
-        except Exception as ue:
-            log(f"  warning: usage collection failed: {type(ue).__name__}: {ue}")
+            exit_code, stdout, stderr, exec_elapsed = _exec_amplifier(
+                instance_id,
+                bundle_name=spec.bundle.name,
+                prompt=prompt,
+                timeout_s=spec.config.exec_timeout_s,
+            )
+            result.exit_code = exit_code
+            result.raw_stdout = stdout
+            result.raw_stderr = stderr
+            result.exec_seconds = exec_elapsed
+
+            # Try to parse json-trace. Strip leading non-JSON noise (banners,
+            # provisioning logs) before falling back. NOTE: use the FIRST `{`
+            # not the last — the trace is a single top-level object, and the
+            # last `{` is just the metadata object nested inside it.
+            result.json_trace = _extract_json_trace(stdout)
+        finally:
+            # 6. Pull session files — always, even if exec raised or timed out.
+            # The DTU may be in a broken state after a timeout; keep this
+            # best-effort so a pull failure does not mask the original exec exception.
+            try:
+                _file_pull_session(instance_id, run_dir)
+            except Exception as pull_exc:
+                log(f"  warning: file-pull on failure path also failed: {pull_exc}")
+
+            # 6.1. Aggregate LLM usage from the pulled events.jsonl files.
+            # Walks the parent session + every sub-session (delegate, recipes,
+            # fork-skills) since each writes its own events.jsonl into the
+            # standard ~/.amplifier/projects/<slug>/sessions/<id>/ layout that
+            # gets pulled wholesale by step 6.
+            try:
+                result.usage = collect_usage(run_dir / "session")
+                u = result.usage
+                if u.request_count:
+                    log(
+                        f"  ↗ usage: {u.request_count} req across {u.session_count} session(s); "
+                        f"{u.billable_tokens_total:,} billable tok ({u.input_tokens_total:,} in / "
+                        f"{u.output_tokens_total:,} out); max single call {u.max_call_combined_tokens:,}; "
+                        f"llm time {u.llm_time_ms_total / 1000:.1f}s "
+                        f"(avg {u.llm_time_ms_avg / 1000:.2f}s, max {u.llm_time_ms_max / 1000:.1f}s)"
+                    )
+                else:
+                    log("  ↗ usage: 0 LLM requests recorded (no events.jsonl or no llm:response events)")
+            except Exception as ue:
+                log(f"  warning: usage collection failed: {type(ue).__name__}: {ue}")
 
         # 6a. Post-agent verification — run pytest in /workspace if tests exist.
         # Distinct from amplifier's exit code: catches the case where amplifier
