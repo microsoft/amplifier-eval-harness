@@ -8,6 +8,7 @@ run_index) cartesian product into a flat list of RunSpec.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -124,6 +125,12 @@ class RunConfig:
     keep_dtu_on_failure: bool = True
     keep_dtu_on_success: bool = False
     settings_overlay: Path | None = None
+    # Pin to a specific Gitea instance instead of greedily reusing whichever
+    # one `amplifier-gitea list` returns first. Required when multiple
+    # workspaces share a host so they don't stomp on each other's instance.
+    # Resolution order: env var EVAL_HARNESS_GITEA_INSTANCE > YAML
+    # `gitea_instance_id` > unset (falls back to greedy reuse / create-new).
+    gitea_instance_id: str | None = None
     ecosystem_overrides: list[EcosystemOverride] = field(default_factory=list)
     bundles: list[BundleSpec] = field(default_factory=list)
     scenarios: list[ScenarioSpec] = field(default_factory=list)
@@ -169,12 +176,21 @@ def load_config(config_path: str | Path) -> RunConfig:
 
     base = config_path.parent
 
-    # Output dir: default to ./eval-results/<timestamp>/ relative to config
+    # Output dir: default to <project>/eval-results/<config-stem>-<timestamp>/
+    #
+    # The README documents output as "eval-results/<config-stem>-<timestamp>/"
+    # rooted at the project (one level above configs/), and the rest of this
+    # loader uses base.parent for the same project-root anchor (profile_template
+    # and scenarios both default to base.parent / ...). Earlier versions used
+    # `base / "eval-results"`, which placed results under configs/eval-results/.
+    # The .gitignore intentionally matches `eval-results/` at any depth, so
+    # both layouts were ignored, but only the project-root layout matched the
+    # README and the rest of the path conventions.
     if "output_dir" in raw:
         output_dir = _resolve(raw["output_dir"], base)
     else:
         ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        output_dir = (base / "eval-results" / f"{config_path.stem}-{ts}").resolve()
+        output_dir = (base.parent / "eval-results" / f"{config_path.stem}-{ts}").resolve()
 
     # Profile template: default to <package>/profiles/eval-base.yaml.tmpl,
     # but a config can override.
@@ -189,6 +205,13 @@ def load_config(config_path: str | Path) -> RunConfig:
             profile_template = (pkg_root / "_data" / "profiles" / "eval-base.yaml.tmpl").resolve()
 
     settings_overlay = _resolve(raw["settings_overlay"], base) if raw.get("settings_overlay") else None
+
+    # Gitea instance pinning. Env var wins so per-invocation overrides work
+    # without editing the config (handy when the same config gets shared
+    # across machines / workspaces).
+    gitea_instance_id: str | None = os.environ.get("EVAL_HARNESS_GITEA_INSTANCE") or raw.get("gitea_instance_id")
+    if gitea_instance_id is not None:
+        gitea_instance_id = str(gitea_instance_id).strip() or None
 
     # Ecosystem overrides
     eco: list[EcosystemOverride] = []
@@ -260,6 +283,7 @@ def load_config(config_path: str | Path) -> RunConfig:
         keep_dtu_on_failure=bool(raw.get("keep_dtu_on_failure", True)),
         keep_dtu_on_success=bool(raw.get("keep_dtu_on_success", False)),
         settings_overlay=settings_overlay,
+        gitea_instance_id=gitea_instance_id,
         ecosystem_overrides=eco,
         bundles=bundles,
         scenarios=scenarios,

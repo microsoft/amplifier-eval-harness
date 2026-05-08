@@ -6,6 +6,7 @@ Each call to run_one() is independent and may run concurrently in a worker threa
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 import time
@@ -18,6 +19,20 @@ from .config import RunSpec
 from .gitea import GiteaSession
 from .profile import RenderedProfile, render_profile, write_profile
 from .usage import UsageMetrics, collect_usage
+
+# CSI escape sequences (the main offender — colors, cursor moves, screen
+# clears) plus OSC sequences (used for hyperlinks, window titles). Together
+# these cover what amplifier's streaming-UI hook (and most rich/colour
+# libraries) emit to stderr. We strip them defensively from captured stderr
+# because the inner amplifier process does NOT respect NO_COLOR/TERM=dumb
+# universally — Rich-backed printers configured with force_terminal=True (or
+# similar) bypass those signals entirely.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
+
+
+def _strip_ansi(s: str) -> str:
+    """Strip ANSI escape sequences for plain-text archival of captured output."""
+    return _ANSI_RE.sub("", s)
 
 
 @dataclass
@@ -187,8 +202,17 @@ def _exec_amplifier(
     timeout_s: int,
 ) -> tuple[int, str, str, float]:
     """Run `amplifier run --bundle <name> --output-format json-trace "<prompt>"` inside the DTU."""
+    # Disable ANSI escape sequences in amplifier's output so the captured
+    # stderr.log is plain text. The streaming-UI hook (and any other rich-
+    # backed printer) writes ANSI color codes by default; under
+    # `amplifier-digital-twin exec` the inner process can't infer that its
+    # stderr is being captured to a file. NO_COLOR is the widely-supported
+    # convention (no-color.org); TERM=dumb is a defensive fallback for
+    # libraries that do not honor NO_COLOR.
     inner = (
         f"export PATH=/root/.local/bin:$PATH && "
+        f"export NO_COLOR=1 && "
+        f"export TERM=dumb && "
         f"cd /workspace && "
         f"amplifier run --bundle {shlex.quote(bundle_name)} "
         f"--output-format json-trace {shlex.quote(prompt)}"
@@ -207,10 +231,14 @@ def _exec_amplifier(
         outer = json.loads(result.stdout)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Could not parse DTU exec JSON: {e}\nstdout was:\n{result.stdout}") from e
+    # stdout is the json-trace payload (parsed downstream), kept as-is.
+    # stderr is the streaming-UI hook output and gets archived as a human-
+    # readable log; strip ANSI here so stderr.log is plain text regardless of
+    # whether the inner amplifier process honored NO_COLOR/TERM=dumb.
     return (
         int(outer.get("exit_code", -1)),
         outer.get("stdout", ""),
-        outer.get("stderr", ""),
+        _strip_ansi(outer.get("stderr", "")),
         elapsed,
     )
 
