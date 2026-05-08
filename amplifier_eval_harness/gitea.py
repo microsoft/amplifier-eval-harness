@@ -76,8 +76,23 @@ def _run_shell(script: str, *, env: dict[str, str] | None = None) -> subprocess.
 # ---------------------------------------------------------------------------
 
 
-def ensure_gitea(preferred_port: int = 10110) -> GiteaSession:
-    """Find an existing Gitea instance or create a new one. Always returns a fresh token."""
+def ensure_gitea(
+    preferred_port: int = 10110,
+    *,
+    pinned_instance_id: str | None = None,
+) -> GiteaSession:
+    """Find a Gitea instance or create one. Always returns a fresh token.
+
+    Selection precedence:
+      1. If `pinned_instance_id` is provided, pin to that specific instance. It
+         must exist; we never silently fall back to a different one. This is
+         the workspace-isolation knob: pin to your own dedicated instance and
+         the harness will not touch any other Gitea on the host.
+      2. Otherwise, reuse the first instance returned by `amplifier-gitea list`.
+         (Greedy default; fine for solo dev machines, dangerous when multiple
+         workspaces share a host.)
+      3. Otherwise, create a new instance on `preferred_port`.
+    """
     result = _run(["amplifier-gitea", "list"], check=False)
     instances: list[dict] = []
     if result.returncode == 0 and result.stdout.strip():
@@ -88,16 +103,30 @@ def ensure_gitea(preferred_port: int = 10110) -> GiteaSession:
         except json.JSONDecodeError:
             pass
 
-    if instances:
+    instance_id: str
+    port: int
+    if pinned_instance_id:
+        match = next((i for i in instances if i.get("id") == pinned_instance_id), None)
+        if match is None:
+            available = [i.get("id", "?") for i in instances] or ["(none running)"]
+            raise RuntimeError(
+                f"Pinned Gitea instance {pinned_instance_id!r} not found. "
+                f"Running instances: {', '.join(available)}. "
+                f"Create one with: amplifier-gitea create"
+            )
+        instance_id = pinned_instance_id
+        port = int(match.get("port", preferred_port))
+        log(f"Using pinned Gitea instance: {instance_id} on port {port}")
+    elif instances:
         first = instances[0]
-        instance_id = first["id"]
+        instance_id = str(first["id"])
         port = int(first.get("port", preferred_port))
         log(f"Reusing existing Gitea instance: {instance_id} on port {port}")
     else:
         log(f"No existing Gitea instance found; creating one on port {preferred_port}...")
         result = _run(["amplifier-gitea", "create", "--port", str(preferred_port)])
         created = json.loads(result.stdout)
-        instance_id = created["id"]
+        instance_id = str(created["id"])
         port = int(created.get("port", preferred_port))
 
     # Generate a fresh token (uniform across reuse and create paths)

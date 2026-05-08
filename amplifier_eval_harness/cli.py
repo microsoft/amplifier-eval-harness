@@ -133,7 +133,9 @@ def run(config_path: Path, dry_run: bool, parallelism_override: int | None) -> N
 
     # Step 1: Gitea session
     log("Ensuring Gitea instance...")
-    gitea: GiteaSession = ensure_gitea()
+    if config.gitea_instance_id:
+        log(f"  pinned to: {config.gitea_instance_id}")
+    gitea: GiteaSession = ensure_gitea(pinned_instance_id=config.gitea_instance_id)
     log(f"Gitea ready: {gitea.url} (instance {gitea.instance_id})")
 
     # Step 2: Populate every repo we care about (sequential — Gitea is shared state)
