@@ -7,6 +7,7 @@ owns the Gitea side of that pipeline.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shlex
@@ -16,6 +17,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._log import log
+
+# ---------------------------------------------------------------------------
+# Per-(instance, repo) lock directory — prevents concurrent harness processes
+# from racing on ``git push --force`` to the same Gitea remote.
+# ---------------------------------------------------------------------------
+
+_LOCK_DIR = Path("/tmp/eval-harness-locks")
 
 
 @dataclass
@@ -249,10 +257,22 @@ def populate_repo(session: GiteaSession, *, repo_owner: str, repo_name: str, loc
 
     - If local_path is set: snapshot-push the working tree.
     - Otherwise: mirror from github.com/<repo_owner>/<repo_name> (idempotent).
+
+    Concurrent invocations for the same (Gitea instance, repo) pair are
+    serialised with ``fcntl.flock`` on a per-key lock file under ``_LOCK_DIR``
+    so that two harness processes cannot race on ``git push --force`` to the
+    same remote.  The lock is released automatically when the ``with`` block
+    exits (file closed), including on exception.
     """
-    if local_path is not None:
-        snapshot_push(session, local_path, repo_name)
-    else:
-        github_url = f"https://github.com/{repo_owner}/{repo_name}"
-        gh_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-        mirror_from_github(session, github_url, github_token=gh_token)
+    _LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    safe_key = f"{session.instance_id}-{repo_name}".replace("/", "_")
+    lock_path = _LOCK_DIR / f"{safe_key}.lock"
+
+    with open(lock_path, "w") as _lf:
+        fcntl.flock(_lf, fcntl.LOCK_EX)  # blocks until this process holds the lock
+        if local_path is not None:
+            snapshot_push(session, local_path, repo_name)
+        else:
+            github_url = f"https://github.com/{repo_owner}/{repo_name}"
+            gh_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+            mirror_from_github(session, github_url, github_token=gh_token)
