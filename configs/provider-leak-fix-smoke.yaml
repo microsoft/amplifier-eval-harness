@@ -1,0 +1,40 @@
+# provider-leak-fix-smoke — minimal verification of the routing-matrix fix
+#
+# Tests that foundation sub-agents (foundation:bug-hunter, foundation:post-task-cleanup)
+# use the OpenAI provider when routing.matrix=openai is configured, instead of
+# falling back to anthropic due to static provider_preferences in their frontmatter.
+#
+# The fix (Option C) removed static provider_preferences from all foundation agents
+# that declare model_role. Sub-sessions now inherit the parent session's provider
+# priority order (openai=1, anthropic=13) rather than being pinned to the static
+# anthropic-first list.
+#
+# Scope: 2 bundles × 1 scenario × 1 run = 2 runs
+# Expected: by_model breakdown in usage.json shows NO anthropic/* requests
+
+profile: ../profiles/eval-base.yaml.tmpl
+
+parallelism: 2
+launch_timeout_s: 600
+exec_timeout_s: 1500
+
+keep_dtu_on_failure: true
+keep_dtu_on_success: false
+
+# OpenAI-primary overlay — flips priority to 1 and matrix to "openai"
+settings_overlay: ../settings/openai-providers.yaml
+
+ecosystem_overrides:
+  - repo: amplifier-foundation
+    local_path: ../../amplifier-foundation/
+
+bundles:
+  - name: foundation
+    source: git+https://github.com/microsoft/amplifier-foundation@main
+  - name: exp-lean-amplifier-dev
+    source: git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=experiments/exp-lean/exp-lean-amplifier-dev.md
+
+scenarios:
+  - fix-failing-test
+
+runs_per_combo: 1
