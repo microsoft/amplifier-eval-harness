@@ -217,7 +217,7 @@ def _exec_amplifier(
         f"amplifier run --bundle {shlex.quote(bundle_name)} "
         f"--output-format json-trace {shlex.quote(prompt)}"
     )
-    args = ["exec", instance_id, "--", "bash", "-lc", inner]
+    args = ["exec", "--timeout", str(timeout_s), instance_id, "--", "bash", "-lc", inner]
     t0 = time.time()
     result = _run_dtu(args, timeout=timeout_s)
     elapsed = time.time() - t0
