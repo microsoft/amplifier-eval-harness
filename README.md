@@ -6,7 +6,7 @@ Runs `bundles × scenarios × runs` matrices in isolated containers, captures pe
 
 ## Status
 
-**Pre-alpha (v0.2).** Sequential and parallel execution paths in place. Smoke-tests have not yet been run against a live DTU.
+**Pre-alpha (v0.2).** Sequential and parallel execution paths in place. First successful end-to-end smoke run against a live DTU on 2026-05-08 (Linux/Incus, foundation bundle, claude-opus-4-7); broader validation across configs/scenarios is still pending.
 
 ## Quick start
 
@@ -65,6 +65,25 @@ Scenarios live in `scenarios/<id>/`. Each scenario has a `prompt.md` and an opti
 Per-config provider/model selection happens via a YAML overlay deep-merged into the container's `~/.amplifier/settings.yaml` at provision time. The default overlay (`settings/default-providers.yaml`) is lifted from the harness owner's `~/.amplifier/settings.yaml` minus `provider-chat-completions` (which is local-only and not relevant inside DTUs).
 
 To use a different model mix, copy the overlay, edit, and point the config's `settings_overlay:` at the new file.
+
+## Gitea instance pinning
+
+By default the harness greedily reuses the first instance returned by `amplifier-gitea list`, falling back to creating a new one if none exist. That's fine on a solo dev machine but dangerous when multiple workspaces share a host — two harness invocations against the same Gitea race on `populate_repo` and may stomp on each other's mirrors.
+
+To isolate a workspace, create a dedicated Gitea instance and pin to it:
+
+```bash
+amplifier-gitea create --port 10111 --name gitea-myworkspace
+# {"id": "gitea-abcd1234", "port": 10111, ...}
+
+# Pin via env var (per-invocation, no config edit required)
+EVAL_HARNESS_GITEA_INSTANCE=gitea-abcd1234 amplifier-eval-harness run --config configs/smoke.yaml
+
+# Or pin in the config itself
+echo "gitea_instance_id: gitea-abcd1234" >> configs/myconfig.yaml
+```
+
+Resolution order (first wins): `EVAL_HARNESS_GITEA_INSTANCE` env var → YAML `gitea_instance_id` → greedy reuse of first listed instance → create new on port 10110. Pinned instances must already exist; the harness errors out rather than silently falling back.
 
 ## Architecture in 60 seconds
 
