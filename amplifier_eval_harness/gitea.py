@@ -13,6 +13,7 @@ import os
 import shlex
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -178,33 +179,31 @@ def _gitea_repo_exists(session: GiteaSession, repo_name: str) -> bool:
     return exists
 
 
-
 def _wait_for_mirror_ready(session: GiteaSession, repo_name: str, *, timeout: int = 120) -> None:
-	"""Poll until ``git ls-remote`` succeeds against the Gitea repo.
+    """Poll until ``git ls-remote`` succeeds against the Gitea repo.
 
-	``amplifier-gitea mirror-from-github`` returns after Gitea *accepts* the
-	mirror request, but Gitea clones the upstream repo asynchronously.  Until
-	that background clone finishes, ``git fetch`` against the repo returns 502.
-	If a DTU is launched immediately after the mirror call, its provisioning
-	step (``uv tool install``) can fail because the git objects aren't
-	fetchable yet.
+    ``amplifier-gitea mirror-from-github`` returns after Gitea *accepts* the
+    mirror request, but Gitea clones the upstream repo asynchronously.  Until
+    that background clone finishes, ``git fetch`` against the repo returns 502.
+    If a DTU is launched immediately after the mirror call, its provisioning
+    step (``uv tool install``) can fail because the git objects aren't
+    fetchable yet.
 
-	This helper blocks until the repo is actually servable.
-	"""
-	import time as _time
+    This helper blocks until the repo is actually servable.
+    """
+    url = f"http://admin:{session.token}@localhost:{session.port}/admin/{repo_name}.git"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r = subprocess.run(
+            ["git", "ls-remote", url, "HEAD"],
+            capture_output=True,
+            timeout=15,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return
+        time.sleep(3)
+    log(f"  WARNING: mirror readiness poll timed out after {timeout}s for {repo_name}")
 
-	url = f"{session.url}/admin/{repo_name}.git"
-	deadline = _time.time() + timeout
-	while _time.time() < deadline:
-		r = subprocess.run(
-			["git", "ls-remote", url, "HEAD"],
-			capture_output=True,
-			timeout=15,
-		)
-		if r.returncode == 0 and r.stdout.strip():
-			return
-		_time.sleep(3)
-	log(f"  WARNING: mirror readiness poll timed out after {timeout}s for {repo_name}")
 
 def mirror_from_github(session: GiteaSession, github_url: str, *, github_token: str | None = None) -> None:
     """Mirror a GitHub repo to Gitea. Idempotent against pre-existing repos.
