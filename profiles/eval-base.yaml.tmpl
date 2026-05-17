@@ -68,9 +68,12 @@ provision:
     # 1. System deps + uv installer.
     #    pytest + python3-pip are pre-installed so test/refactor/fix scenarios
     #    can run pytest directly without each prompt having to bootstrap them.
+    # python3-yaml is required by the settings-overlay merge (step 4) and the
+    # force-raw injection (step 4b); --no-install-recommends would otherwise
+    # leave PyYAML out of the system Python.
     - apt-get update && apt-get install -y --no-install-recommends
         git curl ca-certificates
-        python3 python3-pip python3-pytest
+        python3 python3-pip python3-pytest python3-yaml
     - curl -LsSf https://astral.sh/uv/install.sh | sh
 
     # 2. Install amplifier from upstream (intercepted by mitmproxy and redirected to Gitea)
@@ -89,6 +92,54 @@ provision:
 
     # 4. Optional: deep-merge settings overlay if one was provided
 {{ SETTINGS_OVERLAY_SETUP_CMD }}
+
+    # 4b. Force session.raw=true so the kernel logs the resolved mount plan.
+    #
+    # Without session.raw=true the kernel emits only {session_id, parent_id, timestamp}
+    # at session:start. With it, a SECOND session:start event carries the
+    # redacted post-overlay mount plan in data.raw — this is what makes
+    # mount-plan extraction from events.jsonl possible, regardless of what
+    # the test bundle declares.
+    #
+    # Wired via a tiny "force-raw" behavior bundle composed through bundle.app.
+    # Bundle.compose() deep-merges session blocks with later-wins precedence
+    # (amplifier-foundation bundle/_dataclass.py:226-227), so this always wins
+    # over the test bundle's session.raw value (if any). This step is harness
+    # machinery and runs on every invocation.
+    - |
+      mkdir -p /root/.amplifier/behaviors
+      cat > /root/.amplifier/behaviors/force-raw.yaml << 'EOF'
+      ---
+      bundle:
+        name: force-raw
+        version: 1.0.0
+        description: Eval-harness overlay that forces session.raw=true so the resolved mount plan is logged.
+
+      session:
+        raw: true
+      EOF
+      python3 - << 'PYEOF'
+      import yaml
+      from pathlib import Path
+      p = Path("/root/.amplifier/settings.yaml")
+      data = yaml.safe_load(p.read_text()) if p.exists() else {}
+      if not isinstance(data, dict):
+          data = {}
+      bundle = data.setdefault("bundle", {})
+      if not isinstance(bundle, dict):
+          bundle = {}
+          data["bundle"] = bundle
+      app = bundle.get("app")
+      if not isinstance(app, list):
+          app = []
+      uri = "file:///root/.amplifier/behaviors/force-raw.yaml"
+      if uri not in app:
+          app.append(uri)
+      bundle["app"] = app
+      p.parent.mkdir(parents=True, exist_ok=True)
+      p.write_text(yaml.safe_dump(data, default_flow_style=False, sort_keys=False))
+      print(f"force-raw wired via bundle.app: {uri}")
+      PYEOF
 
     # 5. Add the bundle under test (no --app: standalone bundle, project-local).
     #    BUNDLE_INSTALL_URL preserves any subdirectory fragment from the source.
