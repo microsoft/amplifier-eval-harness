@@ -85,6 +85,24 @@ echo "gitea_instance_id: gitea-abcd1234" >> configs/myconfig.yaml
 
 Resolution order (first wins): `EVAL_HARNESS_GITEA_INSTANCE` env var → YAML `gitea_instance_id` → greedy reuse of first listed instance → create new on port 10110. Pinned instances must already exist; the harness errors out rather than silently falling back.
 
+## Running inside a nested Incus DTU
+
+When you run `amplifier-eval-harness` from **inside** an Incus DTU (e.g. a `resolve-stack` instance), eval-sub-DTUs are spawned as **siblings** via the forwarded Incus socket. Their `localhost` is their own loopback — not the harness DTU's — so the default `http://localhost:<port>` GITEA_URL baked into sub-DTU profiles is unreachable. `uv tool install` inside the sub-DTU fails on any transitive `git+https://github.com/microsoft/...` dependency because mitmproxy's `url_rewrites` redirect those to the unreachable host.
+
+Fix: set `AMPLIFIER_EVAL_HARNESS_GITEA_HOST` to the harness DTU's `eth0` IP. The harness will use this IP (instead of `localhost`) when passing `GITEA_URL` to eval-sub-DTU launch vars.
+
+```bash
+# Find the harness DTU's eth0 IP (run this inside the DTU):
+ip -4 addr show eth0 | awk '/inet / {print $2}' | cut -d/ -f1
+# e.g. 10.119.176.124
+
+# Set before running the harness:
+export AMPLIFIER_EVAL_HARNESS_GITEA_HOST=10.119.176.124
+amplifier-eval-harness run --config configs/smoke.yaml
+```
+
+Local harness operations (Gitea API calls, mirroring, token fetches) are **not** affected — they still reach Gitea via `localhost` from the harness DTU's own perspective.
+
 ## Architecture in 60 seconds
 
 1. Read config → expand `bundles × scenarios × runs_per_combo` into a flat list of `RunSpec`.

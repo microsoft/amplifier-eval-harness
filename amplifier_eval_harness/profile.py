@@ -10,10 +10,58 @@ What varies per-run is:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 from .config import RunSpec
+
+# ---------------------------------------------------------------------------
+# Nested-DTU Gitea host override
+# ---------------------------------------------------------------------------
+
+# When the harness runs inside an Incus DTU and spawns eval-sub-DTUs as siblings
+# via a forwarded incus socket, the sub-DTUs' "localhost" is their own loopback —
+# not the harness DTU's. The hardcoded "http://localhost:<port>" GITEA_URL baked
+# into sub-DTU profiles resolves to nowhere, causing `uv tool install` to fail on
+# any transitive git+https://github.com/microsoft/... dependency (mitmproxy's
+# url_rewrites redirect those to an unreachable Gitea).
+#
+# Fix: set AMPLIFIER_EVAL_HARNESS_GITEA_HOST=<harness-eth0-ip> and this module
+# rewrites the host portion of GITEA_URL in sub-DTU launch vars so sub-DTUs reach
+# the harness's Gitea. Local harness Gitea operations (API calls, mirroring, token
+# fetches) are NOT affected — they still use GiteaSession.url (localhost).
+#
+# Example (inside resolve-stack-v2):
+#   export AMPLIFIER_EVAL_HARNESS_GITEA_HOST=10.119.176.124
+#   amplifier-eval-harness run --config configs/smoke.yaml
+#
+_ENV_GITEA_HOST = "AMPLIFIER_EVAL_HARNESS_GITEA_HOST"
+
+
+def _resolve_dtu_gitea_url(gitea_url: str) -> str:
+    """Rewrite gitea_url's host for use by eval-sub-DTUs when running inside a nested DTU.
+
+    If AMPLIFIER_EVAL_HARNESS_GITEA_HOST is set and non-empty, the host portion of
+    gitea_url is replaced with its value. The scheme and port are preserved. If the
+    env var is absent or empty, gitea_url is returned unchanged.
+
+    Only the GITEA_URL passed to sub-DTU launch vars is affected; local harness Gitea
+    operations (API calls, mirroring) still use GiteaSession.url (localhost) directly.
+    """
+    override_host = os.environ.get(_ENV_GITEA_HOST, "").strip()
+    if not override_host:
+        return gitea_url
+    parsed = urlparse(gitea_url)
+    # netloc is "host:port" or just "host"; replace only the host, keep the port.
+    if ":" in parsed.netloc:
+        _, port = parsed.netloc.rsplit(":", 1)
+        new_netloc = f"{override_host}:{port}"
+    else:
+        new_netloc = override_host
+    return urlunparse(parsed._replace(netloc=new_netloc))
+
 
 # Repos that are ALWAYS routed through Gitea.
 #
@@ -176,7 +224,9 @@ def render_profile(spec: RunSpec, gitea_url: str, gitea_token: str) -> RenderedP
     )
 
     launch_vars = {
-        "GITEA_URL": gitea_url,
+        # Rewrite the host for sub-DTU access when running inside a nested Incus DTU.
+        # See _resolve_dtu_gitea_url() and AMPLIFIER_EVAL_HARNESS_GITEA_HOST docs above.
+        "GITEA_URL": _resolve_dtu_gitea_url(gitea_url),
         "GITEA_TOKEN": gitea_token,
         "BUNDLE_INSTALL_URL": spec.bundle.install_url(),
         "BUNDLE_REPO": spec.bundle.repo_name,
