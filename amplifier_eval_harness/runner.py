@@ -17,6 +17,7 @@ from typing import Any
 from ._log import clear_prefix, log, set_prefix
 from .config import RunSpec
 from .gitea import GiteaSession
+from .mount_plan import extract_mount_plan
 from .profile import RenderedProfile, render_profile, write_profile
 from .usage import UsageMetrics, collect_usage
 
@@ -67,6 +68,14 @@ class RunResult:
     # LLM usage aggregated from events.jsonl across parent + all sub-sessions.
     # Populated post-pull; defaults to a zero-value record if no events were found.
     usage: UsageMetrics = field(default_factory=UsageMetrics)
+    # Resolved mount plan extracted from the root session's events.jsonl
+    # (requires session.raw=true, forced by the harness's force-raw overlay).
+    # The dict is the post-overlay, post-force-composition view of providers /
+    # tools / hooks / agents / orchestrator / context that was actually
+    # mounted. The sha256 of the canonical JSON goes into summary.csv for
+    # drift detection across runs.
+    mount_plan: dict[str, Any] | None = None
+    mount_plan_sha: str | None = None
     extras: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -410,6 +419,24 @@ def _run_one_inner(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResu
                     log("  ↗ usage: 0 LLM requests recorded (no events.jsonl or no llm:response events)")
             except Exception as ue:
                 log(f"  warning: usage collection failed: {type(ue).__name__}: {ue}")
+
+            # 6.2. Extract the resolved mount plan from the root session's
+            # events.jsonl. Requires session.raw=true, which the harness forces
+            # on via the force-raw behavior bundle composed through bundle.app
+            # in settings.yaml. If extraction returns None, the second
+            # session:start event with data.raw was not present — usually
+            # because force-raw composition was bypassed or this kernel
+            # version doesn't honor session.raw on this code path.
+            try:
+                mp, sha = extract_mount_plan(run_dir / "session")
+                result.mount_plan = mp
+                result.mount_plan_sha = sha
+                if sha:
+                    log(f"  \u2295 mount plan sha={sha[:12]}\u2026")
+                else:
+                    log("  \u2295 mount plan: not found (session.raw=true may not be active)")
+            except Exception as me:
+                log(f"  warning: mount plan extraction failed: {type(me).__name__}: {me}")
 
         # 6a. Post-agent verification — run pytest in /workspace if tests exist.
         # Distinct from amplifier's exit code: catches the case where amplifier

@@ -108,6 +108,14 @@ def write_run_artifacts(run_dir: Path, spec: RunSpec, result: RunResult) -> None
     }
     (run_dir / "dtu-info.json").write_text(json.dumps(dtu_info, indent=2, default=_json_default))
 
+    # mount_plan.json — resolved post-overlay mount plan (only when captured)
+    if result.mount_plan is not None:
+        (run_dir / "mount_plan.json").write_text(
+            json.dumps(result.mount_plan, indent=2, default=_json_default, sort_keys=True)
+        )
+    if result.mount_plan_sha:
+        (run_dir / "mount_plan_sha").write_text(f"{result.mount_plan_sha}\n")
+
 
 def write_manifest(
     output_dir: Path,
@@ -179,6 +187,7 @@ def write_summary_csv(output_dir: Path, specs_results: list[tuple[RunSpec, RunRe
                 "tool_calls",
                 "agents_invoked",
                 "model",
+                "mount_plan_sha",
                 # LLM usage aggregated across parent + every sub-session
                 "llm_requests",
                 "llm_sessions",
@@ -213,6 +222,7 @@ def write_summary_csv(output_dir: Path, specs_results: list[tuple[RunSpec, RunRe
                     md.get("total_tool_calls", ""),
                     md.get("total_agents_invoked", ""),
                     jt.get("model", ""),
+                    result.mount_plan_sha or "",
                     u.request_count,
                     u.session_count,
                     u.input_tokens_total,
@@ -248,9 +258,9 @@ def write_summary_md(output_dir: Path, specs_results: list[tuple[RunSpec, RunRes
     lines.append("")
     lines.append(
         "| Bundle | Scenario | Run | Status | Verify | Wall (s) | LLM time (s) | "
-        "Reqs | Sess | Tok in | Tok out | Tok billable | Cache R | Cache W | Max call | LLM avg (s) |"
+        "Reqs | Sess | Tok in | Tok out | Tok billable | Cache R | Cache W | Max call | LLM avg (s) | Mount |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for spec, result in specs_results:
         u = result.usage
         verify_cell = "—" if result.verify_exit_code is None else str(result.verify_exit_code)
@@ -261,7 +271,8 @@ def write_summary_md(output_dir: Path, specs_results: list[tuple[RunSpec, RunRes
             f"{u.input_tokens_total:,} | {u.output_tokens_total:,} | "
             f"{u.billable_tokens_total:,} | {u.cache_read_tokens_total:,} | "
             f"{u.cache_write_tokens_total:,} | {u.max_call_combined_tokens:,} | "
-            f"{u.llm_time_ms_avg / 1000:.2f} |"
+            f"{u.llm_time_ms_avg / 1000:.2f} | "
+            f"{(result.mount_plan_sha or '')[:12] or '\u2014'} |"
         )
 
     # Per-model breakdown — only emit if any model showed up.
