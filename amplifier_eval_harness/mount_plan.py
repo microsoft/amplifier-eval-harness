@@ -1,9 +1,19 @@
 """Post-run extraction of the resolved mount plan from session events.jsonl.
 
 When `session.raw: true` is set (forced by the harness's force-raw overlay),
-amplifier-core emits a second `session:start` event whose `data.raw` field
-contains the redacted, post-overlay, post-force-composition mount plan.
-We extract that here and write it as <run_dir>/mount_plan.json.
+amplifier-core emits the resolved mount plan in the session events stream.
+
+**Current schema (kernel ≥ May 21 2026):**
+The mount plan is in the first ``session:config`` event whose ``data.raw``
+is a dict.  This event was introduced when the kernel separated session
+initialisation from session configuration.
+
+**Legacy schema (kernel < May 21 2026):**
+The mount plan was in the *second* ``session:start`` event whose ``data.raw``
+is a dict.  A fallback path preserves the ability to re-process old
+eval-results directories (e.g. runs captured before the schema change).
+
+We extract the mount plan and write it as <run_dir>/mount_plan.json.
 
 The mount plan is the ground truth for "what was actually composed for this
 evaluation": providers, tools, hooks, agents, orchestrator, context — after
@@ -40,9 +50,22 @@ def _first_session_start(events_path: Path) -> dict[str, Any] | None:
 
 
 def _find_raw_mount_plan(events_path: Path) -> dict[str, Any] | None:
-    """Find the SECOND session:start event (the one with data.raw)."""
+    """Find the resolved mount plan in events.jsonl.
+
+    Primary location: the first ``session:config`` event whose ``data.raw`` is
+    a dict.  The kernel emits this event when ``session.raw: true`` is set
+    (kernel schema since May 21 2026).
+
+    Fallback (legacy schema, pre-May 21 2026): the second ``session:start``
+    event whose ``data.raw`` is a dict.  Preserved so old eval-results dirs
+    can still be re-processed.
+
+    Returns the raw mount-plan dict, or None if no candidate was found.
+    """
     try:
         with events_path.open("r") as f:
+            session_start_with_raw: dict[str, Any] | None = None
+            session_start_count = 0
             for line in f:
                 line = line.strip()
                 if not line:
@@ -51,13 +74,16 @@ def _find_raw_mount_plan(events_path: Path) -> dict[str, Any] | None:
                     ev = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if ev.get("event") != "session:start":
-                    continue
+                event = ev.get("event")
                 data = ev.get("data") or {}
-                raw = data.get("raw")
-                if isinstance(raw, dict):
-                    return raw
-        return None
+                raw = data.get("raw") if isinstance(data, dict) else None
+                if event == "session:config" and isinstance(raw, dict):
+                    return raw  # primary — preferred, early return
+                if event == "session:start":
+                    session_start_count += 1
+                    if session_start_count >= 2 and isinstance(raw, dict):
+                        session_start_with_raw = raw
+            return session_start_with_raw  # legacy fallback, or None
     except OSError:
         return None
 
