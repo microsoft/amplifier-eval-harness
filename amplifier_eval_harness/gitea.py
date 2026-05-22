@@ -13,8 +13,11 @@ import os
 import shlex
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from ._log import log
 
@@ -92,6 +95,11 @@ def ensure_gitea(
     """Find a Gitea instance or create one. Always returns a fresh token.
 
     Selection precedence:
+      0. If ``AMPLIFIER_EVAL_HARNESS_GITEA_URL`` **and** a token are set in the
+         environment, return an externally-provided session immediately — no
+         Docker interaction at all.  This is the no-Docker bypass for Resolve
+         workers (Incus), which can reach the per-instance Gitea sidecar via the
+         URL the broker injects, but have no access to the Docker daemon.
       1. If `pinned_instance_id` is provided, pin to that specific instance. It
          must exist; we never silently fall back to a different one. This is
          the workspace-isolation knob: pin to your own dedicated instance and
@@ -100,7 +108,37 @@ def ensure_gitea(
          (Greedy default; fine for solo dev machines, dangerous when multiple
          workspaces share a host.)
       3. Otherwise, create a new instance on `preferred_port`.
+
+    Env vars for the no-Docker bypass (precedence 0):
+      AMPLIFIER_EVAL_HARNESS_GITEA_URL        — required, full URL e.g. ``http://10.x.x.x:55807``
+      AMPLIFIER_EVAL_HARNESS_GITEA_TOKEN      — token value directly, OR
+      AMPLIFIER_EVAL_HARNESS_GITEA_TOKEN_ENV  — name of an env var holding the token
+                                                (mirrors Resolve's GIT_PROVIDER_TOKEN_ENV pattern)
+      AMPLIFIER_EVAL_HARNESS_GITEA_INSTANCE_ID — optional label, defaults to ``"external"``
     """
+    # ------------------------------------------------------------------
+    # Env-var bypass: reuse an externally-provided Gitea without Docker.
+    # Use when the harness runs in a sandbox that has no Docker access but
+    # a reachable Gitea — e.g. Resolve workers (Incus) that can reach the
+    # per-instance Gitea sidecar inside the DTU via an env-injected URL.
+    # ------------------------------------------------------------------
+    external_url = os.environ.get("AMPLIFIER_EVAL_HARNESS_GITEA_URL", "").strip()
+    external_token = os.environ.get("AMPLIFIER_EVAL_HARNESS_GITEA_TOKEN", "").strip()
+    external_token_env = os.environ.get("AMPLIFIER_EVAL_HARNESS_GITEA_TOKEN_ENV", "").strip()
+    if not external_token and external_token_env:
+        external_token = os.environ.get(external_token_env, "").strip()
+    if external_url and external_token:
+        parsed = urlparse(external_url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        instance_id = os.environ.get("AMPLIFIER_EVAL_HARNESS_GITEA_INSTANCE_ID", "").strip() or "external"
+        log(f"Reusing externally-provided Gitea: {external_url} (no Docker)")
+        return GiteaSession(
+            instance_id=instance_id,
+            port=port,
+            url=external_url,
+            token=external_token,
+        )
+
     result = _run(["amplifier-gitea", "list"], check=False)
     instances: list[dict] = []
     if result.returncode == 0 and result.stdout.strip():
@@ -156,6 +194,58 @@ def ensure_gitea(
 # ---------------------------------------------------------------------------
 # Repo population: upstream mirror + local snapshot push
 # ---------------------------------------------------------------------------
+
+
+def _is_external_gitea() -> bool:
+    """Return True when the harness is using an externally-provided Gitea (no Docker)."""
+    return bool(os.environ.get("AMPLIFIER_EVAL_HARNESS_GITEA_URL", "").strip())
+
+
+def _mirror_via_api(
+    session: GiteaSession,
+    github_url: str,
+    github_token: str | None = None,
+) -> None:
+    """Mirror a GitHub repo to Gitea via REST API — no Docker, no CLI.
+
+    Used when the harness operates with an externally-provided Gitea
+    (``AMPLIFIER_EVAL_HARNESS_GITEA_URL`` is set).  The
+    ``amplifier-gitea mirror-from-github`` CLI calls ``docker_ops`` internally
+    and will fail in no-Docker environments (e.g. Resolve workers in Incus).
+
+    HTTP 201 (created) and 409 (already exists) are both treated as success.
+    Any other status raises ``RuntimeError``.
+    """
+    repo_name = github_url.rstrip("/").split("/")[-1].removesuffix(".git")
+    endpoint = f"{session.url}/api/v1/repos/migrate"
+    payload = json.dumps(
+        {
+            "clone_addr": github_url,
+            "repo_owner": "admin",
+            "repo_name": repo_name,
+            "mirror": False,
+            "private": False,
+            "auth_token": github_token or "",
+        }
+    ).encode()
+    req = urllib.request.Request(
+        endpoint,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"token {session.token}",
+        },
+        data=payload,
+    )
+    log(f"  · mirror via API: POST {endpoint} (repo={repo_name})")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+    if status not in (201, 409):
+        raise RuntimeError(f"_mirror_via_api: unexpected HTTP {status} from {endpoint} (github_url={github_url!r})")
+    log(f"  · mirror API returned HTTP {status} ({'created' if status == 201 else 'already exists'})")
 
 
 def _gitea_repo_exists(session: GiteaSession, repo_name: str) -> bool:
@@ -217,6 +307,15 @@ def mirror_from_github(session: GiteaSession, github_url: str, *, github_token: 
 
     if _gitea_repo_exists(session, repo_name):
         log(f"  → {repo_name} already in Gitea, skipping mirror.")
+        _wait_for_mirror_ready(session, repo_name)
+        return
+
+    # When using an externally-provided Gitea (no Docker), bypass the CLI and
+    # call the Gitea REST API directly.  ``amplifier-gitea mirror-from-github``
+    # uses docker_ops internally and will fail in no-Docker environments.
+    if _is_external_gitea():
+        _mirror_via_api(session, github_url, github_token)
+        log(f"  → mirrored {github_url} → admin/{repo_name} (via API)")
         _wait_for_mirror_ready(session, repo_name)
         return
 
