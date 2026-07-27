@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from amplifier_eval_harness.mount_plan import _find_raw_mount_plan, extract_mount_plan
+from amplifier_eval_harness.mount_plan import _canonical_sha256, _find_raw_mount_plan, extract_mount_plan
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -175,3 +175,70 @@ def test_extract_mount_plan_skips_child_sessions(tmp_path: Path) -> None:
 
     assert plan is None, "Child sessions should be skipped; expected None"
     assert sha is None
+
+
+# ---------------------------------------------------------------------------
+# Test 7: hash normalization — root_session_id is per-session ephemera
+# ---------------------------------------------------------------------------
+
+
+def test_hash_ignores_root_session_id() -> None:
+    """Two plans differing ONLY in root_session_id must hash-equal.
+
+    root_session_id is a fresh UUID per session; hashing it verbatim would
+    guarantee false drift between runs of the identical configuration.
+    """
+    plan_a = {**_SAMPLE_MOUNT_PLAN, "root_session_id": "uuid-run-one"}
+    plan_b = {**_SAMPLE_MOUNT_PLAN, "root_session_id": "uuid-run-two"}
+
+    assert _canonical_sha256(plan_a) == _canonical_sha256(plan_b), (
+        "Plans identical except root_session_id must produce the same hash"
+    )
+
+
+def test_hash_detects_real_config_drift() -> None:
+    """Plans differing in any real configuration key must hash-differ."""
+    baseline_sha = _canonical_sha256(_SAMPLE_MOUNT_PLAN)
+
+    for key, drifted_value in [
+        ("bundle_name", "other-bundle"),
+        ("providers", ["provider-anthropic"]),
+        ("tools", ["tool-todo", "tool-bash"]),
+        ("session", {"orchestrator": "loop-basic", "context": "context-simple"}),
+    ]:
+        drifted = {**_SAMPLE_MOUNT_PLAN, key: drifted_value}
+        assert _canonical_sha256(drifted) != baseline_sha, f"Drift in real config key {key!r} must change the hash"
+
+
+def test_hash_does_not_mutate_plan() -> None:
+    """Normalization strips keys for hashing only; the plan dict is untouched."""
+    plan = dict(_SAMPLE_MOUNT_PLAN)
+
+    _canonical_sha256(plan)
+
+    assert plan == _SAMPLE_MOUNT_PLAN
+    assert "root_session_id" in plan, "Full plan (session id included) must remain available"
+
+
+def test_extract_mount_plan_sha_stable_across_sessions(tmp_path: Path) -> None:
+    """End-to-end: two runs of the identical config (different session ids) hash-match."""
+    shas: list[str] = []
+    for run, session_id in [("run-one", "session-uuid-1"), ("run-two", "session-uuid-2")]:
+        run_root = tmp_path / run
+        session_dir = run_root / session_id
+        session_dir.mkdir(parents=True)
+        plan = {**_SAMPLE_MOUNT_PLAN, "root_session_id": session_id}
+        events = [
+            {"event": "session:start", "data": {"parent_id": None}},
+            {"event": "session:config", "data": {"parent_id": None, "raw": plan}},
+        ]
+        _write_events(session_dir, events)
+
+        extracted_plan, sha = extract_mount_plan(run_root)
+
+        assert extracted_plan is not None
+        assert extracted_plan["root_session_id"] == session_id, "Extracted plan must keep the session id verbatim"
+        assert sha is not None
+        shas.append(sha)
+
+    assert shas[0] == shas[1], "Identical configuration across sessions must produce identical mount_plan_sha"
