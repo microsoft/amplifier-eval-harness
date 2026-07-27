@@ -20,6 +20,11 @@ evaluation": providers, tools, hooks, agents, orchestrator, context — after
 amplifier-app-cli's overlays and force-composition have been applied. A
 hash of the canonicalized plan goes into summary.csv as `mount_plan_sha`
 so drift between runs is detectable at a glance.
+
+The hash is computed over the plan with per-session ephemera stripped
+(see VOLATILE_MOUNT_PLAN_KEYS): two runs of the identical configuration
+produce the identical hash. The full plan — ephemera included — is still
+written verbatim to <run_dir>/mount_plan.json.
 """
 
 from __future__ import annotations
@@ -88,8 +93,26 @@ def _find_raw_mount_plan(events_path: Path) -> dict[str, Any] | None:
         return None
 
 
+# Top-level mount-plan keys that are per-session ephemera, not configuration.
+# `root_session_id` is a fresh UUID minted for every session, so hashing it
+# would guarantee that two runs of the IDENTICAL configuration never
+# hash-match — defeating the hash's whole purpose (cross-run drift
+# detection). Verified against 35 real mount plans: root_session_id was the
+# ONLY volatile top-level key (no other UUIDs, timestamps, or tmp paths).
+# If future kernel schemas add more per-session fields, add them here — the
+# hash must cover configuration identity, never session identity.
+VOLATILE_MOUNT_PLAN_KEYS = frozenset({"root_session_id"})
+
+
 def _canonical_sha256(payload: dict[str, Any]) -> str:
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    """Canonical SHA-256 of the mount plan with per-session ephemera stripped.
+
+    Only VOLATILE_MOUNT_PLAN_KEYS are removed before hashing; the payload
+    itself is not mutated. The full plan (ephemera included) remains
+    available in the extracted mount_plan.json.
+    """
+    normalized = {k: v for k, v in payload.items() if k not in VOLATILE_MOUNT_PLAN_KEYS}
+    return hashlib.sha256(json.dumps(normalized, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
 def extract_mount_plan(session_root: Path) -> tuple[dict[str, Any] | None, str | None]:
