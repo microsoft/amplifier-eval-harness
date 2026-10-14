@@ -66,6 +66,44 @@ Per-config provider/model selection happens via a YAML overlay deep-merged into 
 
 To use a different model mix, copy the overlay, edit, and point the config's `settings_overlay:` at the new file.
 
+### Credential-isolated solver access (experimental library API)
+
+Default profiles/overlays can place provider credentials in solver-readable
+state. **Do not use the standard `run` command when upstream keys must remain
+unreadable to the evaluated agent:** the credential boundary below is not yet
+wired into the full scheduler/CLI.
+
+`amplifier_eval_harness.credential_proxy.credential_proxy(...)` is a host-only
+context manager for a separately mounted, pinned stock-NGINX Docker proxy:
+
+- Keep the upstream key in a host-private `0700` directory / `0600` configuration,
+  mounted read-only **only into the external proxy**, never the solver.
+- Give the solver only the yielded local API base and temporary access token.
+  Do not forward host credentials, personal configuration, management sockets,
+  or the proxy's process/secret-mount namespace into the solver.
+- Require resource recording: exact container ID before start; confirmed
+  removal and absence before recording it reaped. Ambiguous creation is
+  reconciled by recorded name, nonce label, and full ID. Unknown cleanup retains
+  private recovery files and fails rather than claiming success.
+- Allow only fixed upstream HTTPS POST endpoints ending in `/v1/responses` or
+  `/v1/chat/completions`. TLS verification, literal upstream headers, denied
+  queries/alternate targets, and stripped authentication challenges are part
+  of the generated configuration.
+
+NGINX reserves HTTP 499, so it cannot be mapped through `error_page`; its status
+is preserved while a literal-key filter removes plain credential echoes from
+response bodies. This is **not universal DLP**, encoded-secret protection, or
+arbitrary-header sanitization. A trusted upstream and conventional container
+isolation remain required assumptions.
+
+The caller supplies an execution-UID-owned private directory, full upstream
+API base ending in `/v1`, upstream key, explicit private IPv4 bind address, and
+`record_resource(id, state)` callback (`active` / `reaped`). The helper does not
+provision a solver or prove its isolation. Configuration, wire behavior, and
+solver access boundaries require runtime checks; render/mock unit tests alone
+do not establish them. Captures and credential-bearing configuration must never
+be committed.
+
 ## Gitea instance pinning
 
 By default the harness greedily reuses the first instance returned by `amplifier-gitea list`, falling back to creating a new one if none exist. That's fine on a solo dev machine but dangerous when multiple workspaces share a host — two harness invocations against the same Gitea race on `populate_repo` and may stomp on each other's mirrors.
