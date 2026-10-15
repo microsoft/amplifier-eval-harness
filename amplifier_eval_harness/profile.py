@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
+import yaml
+
 from .config import RunSpec
 
 # ---------------------------------------------------------------------------
@@ -222,6 +224,15 @@ def render_profile(spec: RunSpec, gitea_url: str, gitea_token: str) -> RenderedP
         .replace("{{ SETTINGS_OVERLAY_FILES }}", overlay_files_block.rstrip())
         .replace("{{ SETTINGS_OVERLAY_SETUP_CMD }}", overlay_setup_cmd.rstrip())
     )
+
+    if spec.config.credential_proxy is not None:
+        # Provision without any provider key/base URL passthrough. The runner
+        # supplies only a temporary OpenAI token + proxy URL at execution time.
+        profile = yaml.safe_load(rendered)
+        if not isinstance(profile, dict):
+            raise ValueError("Credential proxy requires a mapping profile")
+        profile["passthrough"] = {"allow_external": True, "services": []}
+        rendered = yaml.safe_dump(profile, sort_keys=False)
 
     launch_vars = {
         # Rewrite the host for sub-DTU access when running inside a nested Incus DTU.

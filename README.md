@@ -66,12 +66,50 @@ Per-config provider/model selection happens via a YAML overlay deep-merged into 
 
 To use a different model mix, copy the overlay, edit, and point the config's `settings_overlay:` at the new file.
 
-### Credential-isolated solver access (experimental library API)
+### Credential-isolated solver access (experimental, OpenAI endpoints only)
 
 Default profiles/overlays can place provider credentials in solver-readable
-state. **Do not use the standard `run` command when upstream keys must remain
-unreadable to the evaluated agent:** the credential boundary below is not yet
-wired into the full scheduler/CLI.
+state. To opt into the external credential proxy through the existing `run`
+command and runner, add this block to your run config:
+
+```yaml
+credential_proxy:
+  bind_ipv4: "10.0.0.1"  # Replace with the host bridge address reachable by the DTU.
+  upstream_key_env: OPENAI_API_KEY
+  upstream_base_url_env: OPENAI_BASE_URL
+```
+
+Set those two host environment variables before running. The base URL must be a
+full HTTPS API base ending in `/v1`; no implicit vendor URL is selected. Parsing,
+validation and `--dry-run` do not load their values. Configure the evaluated
+OpenAI provider to use `${OPENAI_API_KEY}` and `${OPENAI_BASE_URL}`, not inline
+credentials. The mode does not support Anthropic, Gemini or Copilot endpoints.
+
+In this mode the runner:
+
+- Removes **all** provider passthrough services from the rendered DTU profile,
+  and launches with an allowlisted host subprocess environment.
+- Starts the existing external proxy only around agent execution, giving the
+  solver a temporary OpenAI token/base URL in a cleared execution environment.
+- Records proxy IDs/states in a private, fsynced `proxy-resources.jsonl`. Proxy
+  cleanup finishes before session collection or post-agent verification.
+- Requires a fresh `0700` run directory. Unknown cleanup is a harness error;
+  recovery files remain private. A captured CLI return is retained even when
+  subsequent proxy cleanup fails. See `dtu-info.json`'s `extras` for these states.
+
+Use only trusted, nonsecret profiles, settings overlays, bundles and fixtures,
+and fresh DTUs without host management sockets or secret mounts. This option
+does **not** sandbox malicious provisioning commands or arbitrary custom
+profiles, remove Gitea installation credentials, or sanitize every user-authored
+input. The selected upstream key is refused if found in the rendered profile,
+launch variables or settings overlay; this is not a universal secret scanner.
+Without `credential_proxy`, legacy provider passthrough behavior is unchanged.
+
+Runner integration is covered by mocked CLI/lifecycle tests and a fake-key
+control using the real external proxy and DTU health access (launch and agent
+execution replaced with inert controls). That is not proof of a newly
+provisioned, credentialed end-to-end run. Telemetry collection, artifact grading
+and effective worker settings need their own verification.
 
 `amplifier_eval_harness.credential_proxy.credential_proxy(...)` is a host-only
 context manager for a separately mounted, pinned stock-NGINX Docker proxy:

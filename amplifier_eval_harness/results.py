@@ -105,6 +105,7 @@ def write_run_artifacts(run_dir: Path, spec: RunSpec, result: RunResult) -> None
         "ended_at": result.ended_at,
         "status": result.status,
         "error": result.error,
+        "extras": result.extras,
     }
     (run_dir / "dtu-info.json").write_text(json.dumps(dtu_info, indent=2, default=_json_default))
 

@@ -112,6 +112,33 @@ class EcosystemOverride:
 
 
 @dataclass
+class CredentialProxyConfig:
+    """Host-only references; values are never loaded while parsing a config."""
+
+    bind_ipv4: str
+    upstream_key_env: str = "OPENAI_API_KEY"
+    upstream_base_url_env: str = "OPENAI_BASE_URL"
+
+    def __post_init__(self) -> None:
+        from ipaddress import IPv4Address
+
+        try:
+            if type(self.bind_ipv4) is not str:
+                raise ValueError("IPv4 text required")
+            address = IPv4Address(self.bind_ipv4)
+            valid_address = not address.is_unspecified and (address.is_private or address.is_loopback)
+        except (ValueError, TypeError):
+            valid_address = False
+        if not valid_address:
+            raise ValueError("credential_proxy.bind_ipv4 must be an explicit private IPv4 address")
+        for name in (self.upstream_key_env, self.upstream_base_url_env):
+            if not isinstance(name, str) or re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) is None:
+                raise ValueError("credential_proxy requires environment variable names, not values")
+            if name in {"PATH", "HOME", "LANG", "LC_ALL"}:
+                raise ValueError("credential_proxy references must not overlap the subprocess environment allowlist")
+
+
+@dataclass
 class RunConfig:
     """The fully-resolved config for one harness invocation."""
 
@@ -135,6 +162,7 @@ class RunConfig:
     bundles: list[BundleSpec] = field(default_factory=list)
     scenarios: list[ScenarioSpec] = field(default_factory=list)
     runs_per_combo: int = 1
+    credential_proxy: CredentialProxyConfig | None = None
 
 
 @dataclass
@@ -272,6 +300,14 @@ def load_config(config_path: str | Path) -> RunConfig:
     if parallelism < 1:
         raise ValueError(f"parallelism must be >= 1, got {parallelism!r}")
 
+    proxy = None
+    if "credential_proxy" in raw:
+        entry = raw["credential_proxy"]
+        allowed = {"bind_ipv4", "upstream_key_env", "upstream_base_url_env"}
+        if not isinstance(entry, dict) or set(entry) - allowed or "bind_ipv4" not in entry:
+            raise ValueError("credential_proxy requires bind_ipv4 and optional upstream environment references")
+        proxy = CredentialProxyConfig(**entry)
+
     return RunConfig(
         config_path=config_path,
         output_dir=output_dir,
@@ -288,6 +324,7 @@ def load_config(config_path: str | Path) -> RunConfig:
         bundles=bundles,
         scenarios=scenarios,
         runs_per_combo=int(raw.get("runs_per_combo", 1)),
+        credential_proxy=proxy,
     )
 
 

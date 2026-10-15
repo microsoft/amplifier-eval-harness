@@ -6,16 +6,19 @@ Each call to run_one() is independent and may run concurrently in a worker threa
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
 import time
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ._log import clear_prefix, log, set_prefix
 from .config import RunSpec
+from .credential_proxy import credential_proxy, render_nginx_config
 from .gitea import GiteaSession
 from .mount_plan import extract_mount_plan
 from .profile import RenderedProfile, render_profile, write_profile
@@ -109,10 +112,15 @@ class RunResult:
 # ---------------------------------------------------------------------------
 
 
-def _run_dtu(args: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess:
+def _run_dtu(
+    args: list[str], *, timeout: int | None = None, clean_env: bool = False
+) -> subprocess.CompletedProcess:
     cmd = ["amplifier-digital-twin", *args]
     log(f"+ {' '.join(shlex.quote(c) for c in cmd)}")
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    kwargs = {}
+    if clean_env:
+        kwargs["env"] = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG", "LC_ALL")}
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kwargs)
 
 
 def _extract_json_trace(stdout: str) -> dict[str, Any] | None:
@@ -145,13 +153,15 @@ def _extract_json_trace(stdout: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-def _launch_dtu(profile_path: Path, launch_vars: dict[str, str], *, timeout_s: int) -> tuple[str, float]:
+def _launch_dtu(
+    profile_path: Path, launch_vars: dict[str, str], *, timeout_s: int, clean_env: bool = False
+) -> tuple[str, float]:
     """Launch a DTU from the profile, return (instance_id, elapsed_seconds)."""
     args = ["launch", str(profile_path)]
     for k, v in launch_vars.items():
         args.extend(["--var", f"{k}={v}"])
     t0 = time.time()
-    result = _run_dtu(args, timeout=timeout_s)
+    result = _run_dtu(args, timeout=timeout_s, **({"clean_env": True} if clean_env else {}))
     elapsed = time.time() - t0
     if result.returncode != 0:
         raise RuntimeError(
@@ -209,6 +219,7 @@ def _exec_amplifier(
     bundle_name: str,
     prompt: str,
     timeout_s: int,
+    provider_env: dict[str, str] | None = None,
 ) -> tuple[int, str, str, float]:
     """Run `amplifier run --bundle <name> --output-format json-trace "<prompt>"` inside the DTU."""
     # Disable ANSI escape sequences in amplifier's output so the captured
@@ -218,17 +229,26 @@ def _exec_amplifier(
     # stderr is being captured to a file. NO_COLOR is the widely-supported
     # convention (no-color.org); TERM=dumb is a defensive fallback for
     # libraries that do not honor NO_COLOR.
+    execution_env = ""
+    if provider_env is not None:
+        if set(provider_env) != {"OPENAI_API_KEY", "OPENAI_BASE_URL"}:
+            raise ValueError("Only the temporary OpenAI proxy environment is supported")
+        execution_env = (
+            "env -i HOME=/root PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin NO_COLOR=1 TERM=dumb "
+            + " ".join(shlex.quote(f"{k}={v}") for k, v in provider_env.items())
+            + " "
+        )
     inner = (
         f"export PATH=/root/.local/bin:$PATH && "
         f"export NO_COLOR=1 && "
         f"export TERM=dumb && "
         f"cd /workspace && "
-        f"amplifier run --bundle {shlex.quote(bundle_name)} "
+        f"{execution_env}amplifier run --bundle {shlex.quote(bundle_name)} "
         f"--output-format json-trace {shlex.quote(prompt)}"
     )
     args = ["exec", "--timeout", str(timeout_s), instance_id, "--", "bash", "-lc", inner]
     t0 = time.time()
-    result = _run_dtu(args, timeout=timeout_s)
+    result = _run_dtu(args, timeout=timeout_s, **({"clean_env": True} if provider_env is not None else {}))
     elapsed = time.time() - t0
     if result.returncode != 0:
         raise RuntimeError(
@@ -328,6 +348,64 @@ def _destroy_dtu(instance_id: str) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _proxy_inputs(spec: RunSpec, rendered: RenderedProfile) -> tuple[str, str]:
+    """Resolve host references without storing values in specs, profiles or results."""
+    config = spec.config.credential_proxy
+    key = os.environ.get(config.upstream_key_env, "")
+    base = os.environ.get(config.upstream_base_url_env, "")
+    if not key or not base:
+        raise ValueError("PROXY_HOST_ENV_MISSING")
+    # Reuse the existing renderer's URL/credential validation before launching
+    # anything; never persist its credential-bearing return here.
+    render_nginx_config(base, key, "FAKE_VALIDATION_ONLY_TOKEN_0123456789")
+    texts = [rendered.yaml_text, *rendered.launch_vars.values(), *spec.bundle.__dict__.values()]
+    if spec.config.settings_overlay is not None:
+        texts.append(spec.config.settings_overlay.read_text())
+    if any(isinstance(text, str) and key in text for text in texts):
+        raise ValueError("PROXY_UPSTREAM_KEY_IN_SOLVER_INPUT")
+    return base, key
+
+
+@contextmanager
+def _proxy_environment(run_dir: Path, spec: RunSpec, inputs: tuple[str, str], result: RunResult):
+    """Own the existing proxy around execution, with a private resource journal."""
+    private_dir = run_dir / "credential-proxy"
+    private_dir.mkdir(mode=0o700)
+    fd = os.open(
+        run_dir / "proxy-resources.jsonl",
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    state = {"cleanup": "not_started", "execution": "not_started"}
+    result.extras["credential_proxy"] = state
+    with os.fdopen(fd, "w") as journal:
+        def record(identifier: str, status: str) -> None:
+            if re.fullmatch(r"[a-f0-9]{64}", identifier) is None or status not in ("active", "reaped"):
+                raise ValueError("PROXY_RESOURCE_INVALID")
+            journal.write(json.dumps({"id": identifier, "status": status}) + "\n")
+            journal.flush()
+            os.fsync(journal.fileno())
+
+        state["cleanup"] = "unverified"
+        execution_error = None
+        with credential_proxy(
+            private_dir, inputs[0], inputs[1], spec.config.credential_proxy.bind_ipv4, record
+        ) as (base_url, token):
+            state["execution"] = "started"
+            try:
+                yield {"OPENAI_API_KEY": token, "OPENAI_BASE_URL": base_url}
+            except BaseException as exc:
+                state["execution"] = "raised"
+                # Finish the proxy's normal teardown first so an execution
+                # failure does not prevent recording confirmed cleanup.
+                execution_error = exc
+            else:
+                state["execution"] = "returned"
+        state["cleanup"] = "confirmed"
+        if execution_error is not None:
+            raise execution_error
+
+
 def run_one(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResult:
     """Execute one (bundle, scenario, run_index) combo.
 
@@ -343,7 +421,10 @@ def run_one(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResult:
 
 
 def _run_one_inner(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResult:
-    run_dir.mkdir(parents=True, exist_ok=True)
+    # Proxy runs are single-use. Existing directories (including symlinks) are
+    # never reused, and all captures/recovery files sit behind this private leaf.
+    isolated = spec.config.credential_proxy is not None
+    run_dir.mkdir(parents=True, mode=0o700, exist_ok=not isolated)
     result = RunResult(run_id=spec.run_id, started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
     started_wall = time.time()
 
@@ -353,11 +434,15 @@ def _run_one_inner(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResu
     try:
         # 1. Render and write profile
         rendered = render_profile(spec, gitea_url=gitea.url, gitea_token=gitea.token)
+        proxy_inputs = _proxy_inputs(spec, rendered) if isolated else None
         profile_path = write_profile(spec, rendered, run_dir)
         result.profile_path = profile_path
 
         # 2. Launch
-        instance_id, elapsed = _launch_dtu(profile_path, rendered.launch_vars, timeout_s=spec.config.launch_timeout_s)
+        instance_id, elapsed = _launch_dtu(
+            profile_path, rendered.launch_vars, timeout_s=spec.config.launch_timeout_s,
+            **({"clean_env": True} if isolated else {}),
+        )
         result.dtu_instance_id = instance_id
         result.launch_seconds = elapsed
 
@@ -374,22 +459,22 @@ def _run_one_inner(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResu
         # not mask the original exec exception.
         prompt = spec.scenario.prompt_path.read_text()
         try:
-            exit_code, stdout, stderr, exec_elapsed = _exec_amplifier(
-                instance_id,
-                bundle_name=spec.bundle.name,
-                prompt=prompt,
-                timeout_s=spec.config.exec_timeout_s,
-            )
-            result.exit_code = exit_code
-            result.raw_stdout = stdout
-            result.raw_stderr = stderr
-            result.exec_seconds = exec_elapsed
-
-            # Try to parse json-trace. Strip leading non-JSON noise (banners,
-            # provisioning logs) before falling back. NOTE: use the FIRST `{`
-            # not the last — the trace is a single top-level object, and the
-            # last `{` is just the metadata object nested inside it.
-            result.json_trace = _extract_json_trace(stdout)
+            boundary = _proxy_environment(run_dir, spec, proxy_inputs, result) if isolated else nullcontext(None)
+            with boundary as provider_env:
+                exit_code, stdout, stderr, exec_elapsed = _exec_amplifier(
+                    instance_id,
+                    bundle_name=spec.bundle.name,
+                    prompt=prompt,
+                    timeout_s=spec.config.exec_timeout_s,
+                    **({"provider_env": provider_env} if isolated else {}),
+                )
+                # Retain the CLI return even if proxy teardown subsequently
+                # fails. Cleanup and CLI execution are separate observations.
+                result.exit_code = exit_code
+                result.raw_stdout = stdout
+                result.raw_stderr = stderr
+                result.exec_seconds = exec_elapsed
+                result.json_trace = _extract_json_trace(stdout)
         finally:
             # 6. Pull session files — always, even if exec raised or timed out.
             # The DTU may be in a broken state after a timeout; keep this
@@ -456,7 +541,9 @@ def _run_one_inner(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResu
             log(f"  warning: verify step raised: {type(ve).__name__}: {ve}")
 
     except Exception as e:
-        result.error = f"{type(e).__name__}: {e}"
+        # Upstream validation/callback/subprocess exceptions must not reflect
+        # arbitrary text while the host holds a real credential.
+        result.error = "CREDENTIAL_PROXY_RUN_FAILED" if isolated else f"{type(e).__name__}: {e}"
         log(f"  ERROR: {result.error}")
 
     finally:
