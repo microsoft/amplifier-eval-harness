@@ -111,6 +111,28 @@ execution replaced with inert controls). That is not proof of a newly
 provisioned, credentialed end-to-end run. Telemetry collection, artifact grading
 and effective worker settings need their own verification.
 
+Workspace fixtures and session directories transfer recursively (`-r`), so
+nested files are included. A transfer error is recorded in
+`dtu-info.json`'s `extras.session_pull` and cannot produce an overall `success`.
+The collected usage still needs independent completeness checks; a successful
+transfer alone does not establish complete accounting.
+
+Post-agent pytest preserves **pytest's** exit status, not the output-trimming
+command's. Exit 0 is a passing diagnostic, 1 is failed tests, 5 is no tests
+(`skipped`), and collection/import/transport failures are `verification_error`.
+Raised verification steps are errors, not skips. These signals are separate
+from the retained Amplifier CLI return; the manifest counts verification and
+collection errors independently (these counts can overlap). Failed collection
+has status priority over verification when the CLI otherwise succeeds.
+`keep_dtu_on_failure` applies to these failures
+too. Post-agent tests in a mutable solver workspace are **not** an independent,
+unchanged grader or proof of artifact correctness.
+
+Verification prefers an importable `python3 -m pytest`, with the installed
+`pytest` executable (including a `uv tool` installation) as fallback. If neither is
+available, exit 126 is a verifier/dependency error, not failed subject tests.
+The profile must still provide the task's test dependencies.
+
 `amplifier_eval_harness.credential_proxy.credential_proxy(...)` is a host-only
 context manager for a separately mounted, pinned stock-NGINX Docker proxy:
 

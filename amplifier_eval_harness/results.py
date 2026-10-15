@@ -163,6 +163,11 @@ def write_manifest(
         "total_runs": len(results),
         "successes": sum(1 for r in results if r.status == "success"),
         "task_failures": sum(1 for r in results if r.status == "task_failed"),
+        # Orthogonal errors can coexist with each other or a CLI error.
+        "verification_errors": sum(
+            1 for r in results if r.verify_exit_code is not None and r.verify_exit_code not in (0, 1)
+        ),
+        "collection_errors": sum(1 for r in results if r.extras.get("session_pull") == "failed"),
         "amplifier_errors": sum(1 for r in results if r.status == "amplifier_error"),
         "harness_errors": sum(1 for r in results if r.status == "harness_error"),
     }

@@ -87,7 +87,9 @@ class RunResult:
 
         Returns one of:
           'success'         — amplifier exited 0 AND verify passed (or was skipped)
-          'task_failed'     — amplifier exited 0 BUT verify reported failing tests
+          'task_failed'     — amplifier exited 0 BUT pytest reported failed tests
+          'verification_error' — pytest could not run/collect/complete normally
+          'collection_error' — session transfer failed; telemetry is not complete
           'amplifier_error' — amplifier exited non-zero, or its json-trace status is 'error'
           'harness_error'   — DTU launch/exec/teardown blew up
           'unknown'         — exit code wasn't captured at all
@@ -100,9 +102,11 @@ class RunResult:
             return "amplifier_error"
         if self.json_trace and self.json_trace.get("status") == "error":
             return "amplifier_error"
-        # verify_exit_code == 0 is pass; None means skipped (no tests); anything
-        # else means tests failed or pytest itself errored.
-        if self.verify_exit_code is not None and self.verify_exit_code != 0:
+        if self.extras.get("session_pull") == "failed":
+            return "collection_error"
+        if self.verify_exit_code is not None and self.verify_exit_code not in (0, 1):
+            return "verification_error"
+        if self.verify_exit_code == 1:
             return "task_failed"
         return "success"
 
@@ -200,14 +204,19 @@ def _wait_readiness(instance_id: str, *, max_attempts: int = 60, interval_s: flo
     return time.time() - t0
 
 
-def _push_workspace_fixture(instance_id: str, local_path: Path) -> None:
+def _push_workspace_fixture(
+    instance_id: str, local_path: Path, *, workspace_path: str = "/workspace"
+) -> None:
     """Push scenario workspace files into /workspace inside the DTU."""
     if not local_path.is_dir():
         return
-    args = ["file-push", instance_id]
-    for entry in local_path.iterdir():
+    entries = sorted(local_path.iterdir())
+    if not entries:
+        return
+    args = ["file-push", "-r", instance_id]
+    for entry in entries:
         args.append(str(entry))
-    args.append("/workspace/")
+    args.append(workspace_path.rstrip("/") + "/")
     result = _run_dtu(args, timeout=120)
     if result.returncode != 0:
         raise RuntimeError(f"workspace push failed:\n{result.stderr}")
@@ -272,17 +281,21 @@ def _exec_amplifier(
     )
 
 
-def _file_pull_session(instance_id: str, dest_dir: Path) -> None:
+def _file_pull_session(
+    instance_id: str, dest_dir: Path, *, source_path: str = "/root/.amplifier/projects/"
+) -> None:
     """Pull /root/.amplifier/projects/ from the DTU into dest_dir/session/."""
     dest = dest_dir / "session"
     dest.mkdir(parents=True, exist_ok=True)
-    args = ["file-pull", instance_id, "/root/.amplifier/projects/", str(dest)]
+    args = ["file-pull", "-r", instance_id, source_path, str(dest)]
     result = _run_dtu(args, timeout=300)
     if result.returncode != 0:
-        log(f"  warning: file-pull failed (rc={result.returncode}): {result.stderr.strip()}")
+        raise RuntimeError("SESSION_PULL_FAILED")
 
 
-def _verify_workspace(instance_id: str) -> tuple[int | None, str, float]:
+def _verify_workspace(
+    instance_id: str, *, workspace_path: str = "/workspace"
+) -> tuple[int | None, str, float]:
     """Run pytest inside /workspace AFTER the agent completes.
 
     The harness records this as a separate signal from amplifier's own exit
@@ -294,39 +307,41 @@ def _verify_workspace(instance_id: str) -> tuple[int | None, str, float]:
         (exit_code, summary, elapsed_seconds)
 
         exit_code semantics:
-          None  - no test_*.py in /workspace; verify is skipped (treat as neutral)
+          None  - pytest collected no tests; verification is skipped
           0     - pytest passed
           5     - pytest collected no tests; treat as skipped (returned as None)
           other - pytest failed (1) or errored (2/3/4)
     """
     t0 = time.time()
 
-    # Probe: do any test files exist? (workspace+nested)
-    probe_cmd = "find /workspace -maxdepth 4 -type f -name 'test_*.py' -o -name '*_test.py' 2>/dev/null | head -1"
-    probe = _run_dtu(["exec", instance_id, "--", "bash", "-lc", probe_cmd], timeout=30)
-    if probe.returncode != 0:
-        return None, f"verify: probe failed (rc={probe.returncode}): {probe.stderr[:200]}", time.time() - t0
-    try:
-        outer = json.loads(probe.stdout)
-    except json.JSONDecodeError:
-        return None, "verify: probe stdout not parseable JSON", time.time() - t0
-    test_path = (outer.get("stdout") or "").strip()
-    if not test_path:
-        return None, "verify: skipped (no test_*.py in /workspace)", time.time() - t0
-
-    # Run pytest. --tb=line keeps the failure output compact.
-    pytest_cmd = "cd /workspace && python3 -m pytest --tb=line -q 2>&1 | tail -40"
-    args = ["exec", instance_id, "--", "bash", "-lc", pytest_cmd]
+    # Capture pytest's own exit status, not tail's. Running pytest directly
+    # also distinguishes no tests (5) from discovery/import/transport failures.
+    pytest_cmd = (
+        f"cd -- {shlex.quote(workspace_path)} || exit 125; "
+        # uv tool installs expose pytest on PATH without installing it into
+        # system python3. Prefer the module when available, never interpret
+        # a missing verifier's exit 1 as a failed subject test.
+        "if python3 -c 'import pytest' >/dev/null 2>&1; then python3 -m pytest --tb=line -q; "
+        "elif command -v pytest >/dev/null 2>&1; then pytest --tb=line -q; "
+        "else exit 126; fi 2>&1 | tail -40; "
+        'pytest_exit=${PIPESTATUS[0]}; exit "$pytest_exit"'
+    )
+    args = ["exec", "--timeout", "180", instance_id, "--", "bash", "-c", pytest_cmd]
     result = _run_dtu(args, timeout=180)
     elapsed = time.time() - t0
     if result.returncode != 0:
-        return -1, f"verify: exec wrapper failed (rc={result.returncode}): {result.stderr[:300]}", elapsed
+        return -1, f"verify: exec wrapper failed (rc={result.returncode})", elapsed
     try:
         outer = json.loads(result.stdout)
     except json.JSONDecodeError:
-        return -1, f"verify: pytest stdout unparseable: {result.stdout[:300]}", elapsed
-    pytest_exit = int(outer.get("exit_code", -1))
-    summary = (outer.get("stdout", "") + outer.get("stderr", ""))[-2000:]
+        return -1, "verify: exec envelope is not JSON", elapsed
+    if (
+        type(outer) is not dict or type(outer.get("exit_code")) is not int
+        or type(outer.get("stdout")) is not str or type(outer.get("stderr")) is not str
+    ):
+        return -1, "verify: invalid exec envelope", elapsed
+    pytest_exit = outer["exit_code"]
+    summary = (outer["stdout"] + outer["stderr"])[-2000:]
     if pytest_exit == 5:
         # No tests collected — treat as skip
         return None, "verify: skipped (pytest collected 0 tests)\n" + summary, elapsed
@@ -481,8 +496,10 @@ def _run_one_inner(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResu
             # best-effort so a pull failure does not mask the original exec exception.
             try:
                 _file_pull_session(instance_id, run_dir)
-            except Exception as pull_exc:
-                log(f"  warning: file-pull on failure path also failed: {pull_exc}")
+                result.extras["session_pull"] = "returned"
+            except Exception:
+                result.extras["session_pull"] = "failed"
+                log("  warning: session transfer failed; telemetry coverage is incomplete")
 
             # 6.1. Aggregate LLM usage from the pulled events.jsonl files.
             # Walks the parent session + every sub-session (delegate, recipes,
@@ -531,14 +548,22 @@ def _run_one_inner(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResu
             result.verify_exit_code = v_code
             result.verify_summary = v_summary
             result.verify_seconds = v_elapsed
+            result.extras["verification"] = (
+                "skipped" if v_code is None else
+                "passed" if v_code == 0 else
+                "failed" if v_code == 1 else "error"
+            )
             if v_code is None:
                 log("  · verify skipped")
             elif v_code == 0:
                 log("  ✓ verify passed (pytest 0)")
             else:
                 log(f"  ✗ verify FAILED (pytest rc={v_code})")
-        except Exception as ve:
-            log(f"  warning: verify step raised: {type(ve).__name__}: {ve}")
+        except Exception:
+            result.verify_exit_code = -1
+            result.verify_summary = "verify: step raised; no pytest verdict"
+            result.extras["verification"] = "error"
+            log("  warning: verification raised; not a skip or a correctness failure")
 
     except Exception as e:
         # Upstream validation/callback/subprocess exceptions must not reflect
@@ -549,11 +574,10 @@ def _run_one_inner(spec: RunSpec, gitea: GiteaSession, run_dir: Path) -> RunResu
     finally:
         # 7. Teardown
         if instance_id is not None:
-            keep = (result.error and spec.config.keep_dtu_on_failure) or (
-                not result.error and spec.config.keep_dtu_on_success
-            )
+            failed = result.status != "success"
+            keep = spec.config.keep_dtu_on_failure if failed else spec.config.keep_dtu_on_success
             if keep:
-                reason = "keep_dtu_on_failure" if result.error else "keep_dtu_on_success"
+                reason = "keep_dtu_on_failure" if failed else "keep_dtu_on_success"
                 log(f"  keeping DTU {instance_id} ({reason}=true)")
             else:
                 result.teardown_seconds = _destroy_dtu(instance_id)
